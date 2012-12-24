@@ -1,9 +1,8 @@
-import os, sys, pprint, re, random
+import os, sys, re, random
 import ast
-
-def print_node(node):
-    print(ast.dump(node))
-
+from jittery_python.utils import print_node
+from jittery_python.context import Context, ContextStack
+from jittery_python.builtins import Builtins
 
 class JSCode:
     def __init__(self, code):
@@ -12,80 +11,9 @@ class JSCode:
     def __str__(self):
         return self.code
 
-
-class Context:
-    def __init__(self, stack, class_name = None):
-        self.stack = stack
-        self.class_name = class_name
-        self.globals = []
-        self.arguments = []
-        self.locals = []
-
-    def get_key_id(self, key):
-        if isinstance(key, str):
-            return key
-        elif isinstance(key, ast.Name):
-            return key.id
-        else:
-            raise Exception("Invalid key: %s" % str(key))
-
-    def get(self, key):
-        id = self.get_key_id(key)
-        return id in self.locals or id in self.arguments
-
-    def set(self, key, include = True, ls = None):
-        if ls is None:
-            ls = self.locals
-
-        if ls is self.locals:
-            other_ls = self.arguments
-        else:
-            other_ls = self.locals
-
-        id = self.get_key_id(key)
-        already_in_ls = id in ls
-        already_in_other = id in other_ls
-
-        if include and (self.is_module_context() or id not in self.globals) and not already_in_other and not already_in_ls:
-            ls.append(id)
-        elif not include and already_in_ls:
-            index = ls.index(id)
-            del ls[index]
-
-    def set_global(self, key):
-        id = self.get_key_id(key)
-        if id in self.locals:
-            self.set(id, False)
-            print("SyntaxWarning: name '%s' is assigned to before global declaration" % id)
-
-        self.globals.append(id)
-
-    def is_global(self, key):
-        id = self.get_key_id(key)
-        return id in self.globals
-
-    def set_argument(self, arg):
-        self.set(arg, ls = self.arguments)
-
-    def is_module_context(self):
-        return self is self.stack[0]
-
-    def is_class_context(self):
-        return not not self.class_name
-
-
-class ContextStack(list):
-    def new(self, class_name = None):
-        ctx = Context(self, class_name)
-        self.append(ctx)
-        return ctx
-
-    def find(self, name):
-        id = name.id
-        for ctx in reversed(self):
-            if ctx.get(id):
-                return ctx
-
+def compile(text = None, file = None, bare = None):
+    compiler = Compiler(input_text = text, input_path = file)
+    return compiler.compile(bare = bare)
 
 class Compiler:
     byte = 1
@@ -94,8 +22,9 @@ class Compiler:
     max_file_size = 100 * megabyte
     default_indent = "  "
     function_ops = (ast.FloorDiv, ast.Pow, ast.Eq, ast.NotEq)
+    re_py_ext = re.compile("(\.py)?$")
 
-    def __init__(self, input_path, main_compiler = None):
+    def __init__(self, input_path = None, output_path = None, input_text = None, main_compiler = None, module_name = None):
         self.indent_level = 0
         self.current_indent = ""
 
@@ -104,34 +33,54 @@ class Compiler:
         self.is_main_compiler = not main_compiler
         self.main_compiler = main_compiler
 
-        (self.input_directory_path, self.input_file_path) = self.get_file_path(input_path, "__init__.py")
-        self.output_file_path = "%s.js" % self.input_file_path
-        self.python_path = [self.input_directory_path] + sys.path
+        if input_path:
+            (self.input_directory_path, self.input_file_path) = self.get_file_path(input_path, "__init__.py")
+            if output_path != False:
+                self.output_file_path = output_path or "%s.js" % self.input_file_path
+            else:
+                self.output_file_path = None
+            self.python_path = [self.input_directory_path] + sys.path
+            self.input_text = None
+        elif isinstance(input_text, str):
+            self.input_file_path = None
+            self.input_directory_path = os.path.abspath('.')
+            self.python_path = sys.path
+            self.output_file_path = output_path
+            self.input_text = input_text
+        else:
+            raise Exception("Can't run compiler without either specifying input_path or input_text in the arguments")
 
         if self.is_main_compiler:
             self.module_name = "__main__"
             self.modules = []
+            self.builtins = Builtins()
         else:
-            module_name = os.path.relpath(self.input_file_path, self.main_compiler.input_directory_path)
-            self.module_name = re.sub("(\.py)?$", "", module_name)
+            if not module_name:
+                try:
+                    module_name = os.path.relpath(self.input_file_path, self.main_compiler.input_directory_path)
+                except ValueError:
+                    module_name = self.gensym("module").id
+                self.module_name = self.re_py_ext.sub("", module_name)
+            else:
+                self.module_name = module_name
 
         self.local_module_name = self.gensym(self.module_name, ast.Load())
 
         if self.is_main_compiler:
             self.main_compiler = self
-        self.compile()
 
     def get_file_path(self, path, default_file_name):
-        file = dir = None
+        f = None
+        d = None
         if path != None and os.path.exists(path):
             path = os.path.abspath(path)
             if os.path.isdir(path):
-                file = os.path.join(path, os.path.basename(default_file_name))
-                dir = path
+                f = os.path.join(path, os.path.basename(default_file_name))
+                d = path
             elif os.path.isfile(path):
-                file = path
-                dir = os.path.dirname(path)
-        return (dir, file)
+                f = path
+                d = os.path.dirname(path)
+        return (d, f)
 
     def indent(self, modify = 0):
         if modify:
@@ -158,18 +107,43 @@ class Compiler:
         call = ast.Call(to_call, [name], None, None, None)
         return self.compile_node(call)
 
-    def compile(self):
-        input_f = open(self.input_file_path, 'r')
-        python_code = input_f.read(self.max_file_size)
+    def import_builtins(self):
+        compiler = Compiler(input_text = self.builtins)
+
+    def compile(self, bare = False, verbose = False):
+        self.bare = bare
+        self.verbose = verbose
+
+        if self.input_file_path:
+            input_f = open(self.input_file_path, 'r')
+            python_code = input_f.read(self.max_file_size)
+        else:
+            python_code = self.input_text
         file_ast = ast.parse(python_code)
-        print_node(file_ast)
+
+        if self.verbose:
+            print_node(file_ast)
+
         self.compile_Module(file_ast)
         if self.is_main_compiler:
-            require_stmt = 'typeof require !== "undefined" && require("./python")'
-            import_stmt = self.import_me()
-            compiled = "%s;\n\n%s;\n\n%s;" % (require_stmt, ";\n\n".join(self.modules), import_stmt)
-            output_f = open(self.output_file_path, 'w+')
-            output_f.write(compiled)
+            if not self.bare:
+                # f = open("builtins.temp.py", "w+")
+                # f.write(self.builtins.module_text)
+                # f.truncate()
+                if self.builtins.module_text:
+                    self.compile_Import(input_text = self.builtins.module_text, input_name = "builtins")
+                import_stmt = self.import_me()
+                code = self.modules + [import_stmt]
+            else:
+                code = self.modules
+
+            compiled = ";\n\n".join(code) + ";\n"
+            if self.output_file_path:
+                output_f = open(self.output_file_path, 'w+')
+                output_f.write(compiled)
+                output_f.close()
+            else:
+                return compiled
 
     def compile_node(self, node, *args):
         if isinstance(node, list):
@@ -188,27 +162,46 @@ class Compiler:
             result += trailing
         return result
 
+    def compile_statement_list(self, ls):
+        return self.compile_node_list(ls, ";\n%s" % self.indent(), ";")
+
     def compile_Module(self, node):
-        module_name = ast.Str(self.module_name)
-        args = ast.arguments([ast.arg(self.local_module_name.id, None)], None, None, None, None, None, None, None)
-        func = ast.FunctionDef(name = '', args = args, body = node.body, decorator_list = [], returns = None)
-        to_call = JSCode("__python__.register_module")
-        call = ast.Call(to_call, [module_name, func], None, None, None)
-        result = self.compile_node(call)
+        if not self.bare:
+            module_name = ast.Str(self.module_name)
+            args = ast.arguments([ast.arg(self.local_module_name.id, None)], None, None, None, None, None, None, None)
+            func = ast.FunctionDef(name = '', args = args, body = node.body, decorator_list = [], returns = None)
+            to_call = JSCode("__python__.register_module")
+            call = ast.Call(to_call, [module_name, func], None, None, None)
+            result = self.compile_node(call)
+        else:
+            result = self.compile_node(node.body)
         self.main_compiler.modules.append(result)
 
-    def compile_Import(self, node):
-        names = node.names
-        results = []
-        for alias in names:
-            name = alias.name
-            file_name = "%s.py" % os.path.join(self.input_directory_path, name)
-            compiler = Compiler(file_name, self.main_compiler)
+    def compile_Import(self, node = None, input_text = None, input_name = None):
+        def do_import(name, input_path = None, input_text = None):
+            compiler = Compiler(input_path = input_path, input_text = input_text, main_compiler = self.main_compiler, module_name = input_name)
+            compiler.compile()
             import_call = compiler.import_me()
-            asname = ast.Name(alias.asname or name, ast.Store())
+            asname = ast.Name(name, ast.Store())
             assign = ast.Assign([asname], JSCode(import_call))
-            results.append(assign)
-        return self.compile_node_list(results, ", ", "")
+            return assign
+
+        if node:
+            names = node.names
+            results = []
+            for alias in names:
+                name = alias.name
+                file_name = "%s.py" % os.path.join(self.input_directory_path, name)
+                result = do_import(alias.asname or name, input_path = file_name)
+                results.append(result)
+            return self.compile_node_list(results, ", ", "")
+        elif isinstance(input_text, str):
+            if not input_name:
+                raise Exception("Can't compile input_text without input_name")
+            assign = do_import(input_name, input_text = input_text)
+            return self.compile_node(assign)
+        else:
+            raise Exception("Can't import nothing")
 
     def compile_ImportFrom(self, node):
         module = node.module
@@ -232,10 +225,23 @@ class Compiler:
     def compile_JSCode(self, node):
         return node.code
 
+    jseval_name = "jseval"
     def compile_Call(self, node):
-        func = self.compile_node(node.func)
-        args = self.compile_node_list(node.args, ", ", "")
-        return "%s(%s)" % (func, args)
+        func = node.func
+        args = node.args
+
+        # jseval
+        if isinstance(func, ast.Name) and func.id == self.jseval_name:
+            arg = args[0]
+            if isinstance(arg, ast.Str):
+                return arg.s
+            else:
+                raise Exception("%s can only be called with a single string argument." % self.jseval_name)
+        # Normal function call
+        else:
+            func = self.compile_node(func)
+            args = self.compile_node_list(args, ", ", "")
+            return "%s(%s)" % (func, args)
 
     def compile_ClassCall(self, call):
         return "new %s" % self.compile_node(call)
@@ -338,17 +344,16 @@ class Compiler:
     def compile_Attribute(self, node, assign = None):
         ctx = node.ctx
         value = self.compile_node(node.value)
-        attrstring = ast.Str(node.attr)
+        attr = node.attr
+
         if isinstance(ctx, ast.Store):
-            func = JSCode('%s.__setattribute__' % value)
-            args = [attrstring, assign]
+            pass
         elif isinstance(ctx, ast.Load):
-            func = JSCode('%s.__getattribute__' % value)
-            args = [attrstring]
+            pass
         else:
             raise Exception("Can't compile attribute with context of type %s" % ctx.__class__.__name__)
-        call = ast.Call(func, args, None, None, None)
-        return self.compile_node(call)
+
+        return "%s.%s" % (value, attr)
 
     def compile_Subscript(self, node):
         value = node.value
@@ -498,10 +503,12 @@ class Compiler:
     )
     def compile_Name(self, node):
         id = node.id
+        ctx = node.ctx
+        is_super = id == "super"
         if id in self.javascript_reserved_words:
             id = "$%s" % id
+            node = ast.Name(id, ctx)
 
-        ctx = node.ctx
         if isinstance(ctx, ast.Store):
             active_ctx = self.context_stack[-1]
             if active_ctx.is_global(node):
@@ -514,10 +521,27 @@ class Compiler:
         if not is_local_module_name and active_ctx and active_ctx.is_module_context():
             local_module_name = self.compile_node(self.local_module_name)
             return "%s.%s" % (local_module_name, id)
-        elif active_ctx and active_ctx.is_class_context():
+        elif not is_super and active_ctx and active_ctx.is_class_context():
             return "%s.%s.%s" % (active_ctx.class_name, "prototype", id)
         else:
+            self.main_compiler.builtins.use(id)
             return id
+
+    def compile_If(self, node):
+        indent0 = self.indent()
+        indent1 = self.indent(1)
+
+        test = self.compile_node(node.test)
+        body = self.compile_statement_list(node.body)
+        if node.orelse:
+            orelse = self.compile_statement_list(node.orelse)
+            orelse = " else {\n%(indent1)s%(orelse)s\n%(indent0)s}" % {'orelse': orelse, 'indent0': indent0, 'indent1': indent1}
+        else:
+            orelse = ''
+
+        self.indent(-1)
+
+        return 'if (%(test)s) {\n%(indent1)s%(body)s\n%(indent0)s}%(orelse)s' % {'test': test, 'body': body, 'orelse': orelse, 'indent0': indent0, 'indent1': indent1}
 
     def compile_Global(self, node):
         ctx = self.context_stack[-1]
@@ -564,14 +588,11 @@ class Compiler:
             args = ', '.join(args)
         else:
             args = ''
-        body = self.compile_node_list(node.body, ";\n%s" % indent1, ";")
+        body = self.compile_statement_list(node.body)
 
-        if not ctx.is_module_context() and not ctx.is_class_context():
-            declare_locals = ", ".join(ctx.locals)
-            if declare_locals:
-                declare_locals = "%svar %s;\n" % (indent1, declare_locals)
-        else:
-            declare_locals = ""
+        declare_locals = ", ".join(ctx.locals)
+        if declare_locals:
+            declare_locals = "%svar %s;\n" % (indent1, declare_locals)
 
         value = ("function (%s) {\n%s"
                  "%s%s\n"
