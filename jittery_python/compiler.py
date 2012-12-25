@@ -41,7 +41,7 @@ class Compiler:
                 self.output_file_path = None
             self.python_path = [self.input_directory_path] + sys.path
             self.input_text = None
-        elif isinstance(input_text, str):
+        elif input_text:
             self.input_file_path = None
             self.input_directory_path = os.path.abspath('.')
             self.python_path = sys.path
@@ -51,7 +51,7 @@ class Compiler:
             raise Exception("Can't run compiler without either specifying input_path or input_text in the arguments")
 
         if self.is_main_compiler:
-            self.module_name = "__main__"
+            self.module_name = module_name or "__main__"
             self.modules = []
             self.builtins = Builtins()
         else:
@@ -127,11 +127,11 @@ class Compiler:
         self.compile_Module(file_ast)
         if self.is_main_compiler:
             if not self.bare:
-                # f = open("builtins.temp.py", "w+")
-                # f.write(self.builtins.module_text)
-                # f.truncate()
+                f = open("builtins.temp.py", "w+")
+                f.write(self.builtins.module_text)
+                f.truncate()
                 if self.builtins.module_text:
-                    self.compile_Import(input_text = self.builtins.module_text, input_name = "builtins")
+                   self.compile_Import(input_text = self.builtins.module_text, input_name = "builtins")
                 import_stmt = self.import_me()
                 code = self.modules + [import_stmt]
             else:
@@ -202,6 +202,19 @@ class Compiler:
             return self.compile_node(assign)
         else:
             raise Exception("Can't import nothing")
+
+    # def compile_Import(self, node):
+    #     names = node.names
+    #     results = []
+    #     for alias in names:
+    #         name = alias.name
+    #         file_name = "%s.py" % os.path.join(self.input_directory_path, name)
+    #         compiler = Compiler(file_name, self.main_compiler)
+    #         import_call = compiler.import_me()
+    #         asname = ast.Name(alias.asname or name, ast.Store())
+    #         assign = ast.Assign([asname], JSCode(import_call))
+    #         results.append(assign)
+    #     return self.compile_node_list(results, ", ", "")
 
     def compile_ImportFrom(self, node):
         module = node.module
