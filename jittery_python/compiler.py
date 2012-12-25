@@ -327,12 +327,9 @@ class Compiler:
             return self.compile_node_list(assignments, ', ', '')
         else:
             target = targets[0]
-            if isinstance(target, ast.Attribute):
-                return self.compile_Attribute(target, value)
-            else:
-                c_target = self.compile_node(target)
-                c_value = self.compile_node(value)
-                return "%s %s %s" % (c_target, assigner, c_value)
+            c_target = self.compile_node(target)
+            c_value = self.compile_node(value)
+            return "%s %s %s" % (c_target, assigner, c_value)
 
     def compile_AugAssign(self, node):
         target = node.target
@@ -432,11 +429,11 @@ class Compiler:
 
     # Comparison operators
     def compile_Eq(self, node):
-        name = ast.Name("eq", ast.Load())
+        name = ast.Name("__eq__", ast.Load())
         return self.compile_node(name)
 
     def compile_NotEq(self, node):
-        name = ast.Name("eq", ast.Load())
+        name = ast.Name("__eq__", ast.Load())
         return "!%s" % self.compile_node(name)
 
     def compile_Gt(self, node):
@@ -544,7 +541,9 @@ class Compiler:
             active_ctx = self.context_stack.find(node) or (self.context_stack and self.context_stack[0])
 
         is_local_module_name = node is self.local_module_name
-        if not is_local_module_name and active_ctx and active_ctx.is_module_context() and active_ctx.get(node):
+        if is_super:
+            return "self.%s" % id
+        elif not is_local_module_name and active_ctx and active_ctx.is_module_context() and active_ctx.get(node):
             local_module_name = self.compile_node(self.local_module_name)
             return "%s.%s" % (local_module_name, id)
         elif not is_super and active_ctx and active_ctx.is_class_context() and active_ctx.get(node):
@@ -569,6 +568,44 @@ class Compiler:
 
         return 'if (%(test)s) {\n%(indent1)s%(body)s\n%(indent0)s}%(orelse)s' % {'test': test, 'body': body, 'orelse': orelse, 'indent0': indent0, 'indent1': indent1}
 
+    def compile_For(self, node):
+        indent0 = self.indent()
+        indent1 = self.indent(1)
+
+        target = node.target
+        iter = node.iter
+        body = node.body
+
+        counter = 'i'
+        len = 'len'
+        counter_store = self.gensym(counter, ast.Store())
+        counter_load = self.gensym(counter, ast.Load())
+        len_store = self.gensym(len, ast.Store())
+        len_load = self.gensym(len, ast.Load())
+        for_condition = "(%(counter_store)s = 0, %(len_store)s = %(iter)s.length;" \
+                        " %(counter_load)s < %(len_load)s;" \
+                        " %(counter_store)s++)" % {
+                            'counter_store': self.compile_node(counter_store),
+                            'counter_load': self.compile_node(counter_load),
+                            'len_store': self.compile_node(len_store),
+                            'len_load': self.compile_node(len_load),
+                            'iter': self.compile_node(iter),
+                        }
+
+        target_assign = ast.Assign([target], ast.Subscript(iter, counter_load, None))
+        body = [target_assign] + body
+        return 'for %(for_condition)s {\n%(indent1)s%(body)s\n%(indent0)s}' % {
+            'for_condition': for_condition,
+            'indent0': indent0,
+            'indent1': indent1,
+            'body': self.compile_statement_list(body)
+        }
+
+    def compile_Raise(self, node):
+        exc = node.exc
+        cause = node.cause
+        return "throw %s" % self.compile_node(exc)
+
     def compile_Global(self, node):
         ctx = self.context_stack[-1]
         for name in node.names:
@@ -582,17 +619,15 @@ class Compiler:
         return self.compile_ClassCall(call)
 
     def compile_Array(self, node_list):
-        elts = self.compile_node_list(node.elts, ", ", "")
+        elts = self.compile_node_list(node_list, ", ", "")
         return "[%s]" % elts
 
     def compile_List(self, node):
-        listcls = ast.Name('list', ast.Load())
-        call = ast.Call(listcls, [self.compile_Array(node.elts)], None, None, None)
-        return self.compile_ClassCall(call)
+        return self.compile_Array(node.elts)
 
     def compile_Tuple(self, node):
         tuplecls = ast.Name('tuple', ast.Load())
-        call = ast.Call(tuplecls, [self.compileArray(node.elts)], None, None, None)
+        call = ast.Call(tuplecls, [JSCode(self.compile_Array(node.elts))], None, None, None)
         return self.compile_ClassCall(call)
 
     def compile_Lambda(self, node):
@@ -640,24 +675,20 @@ class Compiler:
     def compile_ClassDef(self, node):
         name = node.name
         body = node.body
-        objectname = self.compile_node(ast.Name("object", ast.Load()))
-        cls = JSCode("function %s() { return %s.call(this, arguments); }" % (name, objectname))
+        instantiate = self.compile_node(ast.Name("_class_instantiate", ast.Load()))
+        cls = JSCode("function %s() { return %s(this, arguments); }" % (name, instantiate))
 
-        if node.bases:
-            basename = node.bases[0]
-            func = JSCode("%s.extend" % objectname)
-            base = ast.Call(func, [JSCode(name), basename], None, None, None)
-            sup = JSCode("%s.prototype" % self.compile_node(basename))
-        else:
-            base = JSCode("")
-            sup = JSCode("%s.prototype" % self.compile_node(ast.Name("object", ast.Load())))
+        if not node.bases:
+            node.bases = [ast.Name('object', ast.Load())]
+        elif len(node.bases) > 1:
+            raise CompileError("Multiple inheritance is not currently supported")
 
-        supname = [ast.Name("super", ast.Store())]
-        suplambda = ast.Lambda(args = [], body = sup)
-        supassign = ast.Assign(supname, suplambda)
+        basename = node.bases[0]
+        func = ast.Name("_class_extend", ast.Load())
+        base = ast.Call(func, [JSCode(name), basename], None, None, None)
 
         ret = ast.Return(JSCode(name))
-        func = ast.FunctionDef(name = None, args = None, body = [base, supassign, cls] + body + [ret])
+        func = ast.FunctionDef(name = None, args = None, body = [base, cls] + body + [ret])
         func = JSCode(self.compile_FunctionDef(func, class_name = name))
         call = ast.Call(func, [], None, None, None)
         cls_name = ast.Name(name, ast.Store())
