@@ -15,6 +15,8 @@ def compile(text = None, file = None, bare = None):
     compiler = Compiler(input_text = text, input_path = file)
     return compiler.compile(bare = bare)
 
+class CompileError(Exception): pass
+
 class Compiler:
     byte = 1
     kilobyte = 1024 * byte
@@ -48,7 +50,7 @@ class Compiler:
             self.output_file_path = output_path
             self.input_text = input_text
         else:
-            raise Exception("Can't run compiler without either specifying input_path or input_text in the arguments")
+            raise CompileError("Can't run compiler without either specifying input_path or input_text in the arguments")
 
         if self.is_main_compiler:
             self.module_name = module_name or "__main__"
@@ -86,7 +88,7 @@ class Compiler:
         if modify:
             self.indent_level += modify
             if self.indent_level < 0:
-                raise Exception("Indent level can't drop below zero. Current level is %i." % (self.indent_level))
+                raise CompileError("Indent level can't drop below zero. Current level is %i." % (self.indent_level))
             self.current_indent = "".join([self.default_indent for x in range(self.indent_level)])
         return self.current_indent
 
@@ -104,11 +106,11 @@ class Compiler:
     def import_me(self):
         to_call = ast.Name("__import__", ast.Load())
         name = ast.Str(self.module_name)
-        call = ast.Call(to_call, [name], None, None, None)
+        args = [name]
+        # if self.is_main_compiler:
+        #     args.append(ast.Str("builtins"))
+        call = ast.Call(to_call, args, None, None, None)
         return self.compile_node(call)
-
-    def import_builtins(self):
-        compiler = Compiler(input_text = self.builtins)
 
     def compile(self, bare = False, verbose = False):
         self.bare = bare
@@ -127,9 +129,6 @@ class Compiler:
         self.compile_Module(file_ast)
         if self.is_main_compiler:
             if not self.bare:
-                f = open("builtins.temp.py", "w+")
-                f.write(self.builtins.module_text)
-                f.truncate()
                 if self.builtins.module_text:
                    self.compile_Import(input_text = self.builtins.module_text, input_name = "builtins")
                 import_stmt = self.import_me()
@@ -152,7 +151,7 @@ class Compiler:
             class_name = node.__class__.__name__
             f = getattr(self, "compile_%s" % class_name)
             if not f:
-                raise Exception("No compiler for AST node %s" % class_name)
+                raise CompileError("No compiler for AST node %s" % class_name)
         return f(node, *args)
 
     def compile_node_list(self, nodes, joiner = ";\n", trailing = ";"):
@@ -166,7 +165,9 @@ class Compiler:
         return self.compile_node_list(ls, ";\n%s" % self.indent(), ";")
 
     def compile_Module(self, node):
-        if not self.bare:
+        self.is_builtins = self.module_name == "builtins"
+
+        if not self.bare and not self.is_builtins:
             module_name = ast.Str(self.module_name)
             args = ast.arguments([ast.arg(self.local_module_name.id, None)], None, None, None, None, None, None, None)
             func = ast.FunctionDef(name = '', args = args, body = node.body, decorator_list = [], returns = None)
@@ -174,8 +175,14 @@ class Compiler:
             call = ast.Call(to_call, [module_name, func], None, None, None)
             result = self.compile_node(call)
         else:
+            self.context_stack.new()
             result = self.compile_node(node.body)
-        self.main_compiler.modules.append(result)
+            self.context_stack.pop()
+
+        if self.is_builtins:
+            self.main_compiler.modules = [result] + self.main_compiler.modules
+        else:
+            self.main_compiler.modules.append(result)
 
     def compile_Import(self, node = None, input_text = None, input_name = None):
         def do_import(name, input_path = None, input_text = None):
@@ -197,24 +204,11 @@ class Compiler:
             return self.compile_node_list(results, ", ", "")
         elif isinstance(input_text, str):
             if not input_name:
-                raise Exception("Can't compile input_text without input_name")
+                raise CompileError("Can't compile input_text without input_name")
             assign = do_import(input_name, input_text = input_text)
             return self.compile_node(assign)
         else:
-            raise Exception("Can't import nothing")
-
-    # def compile_Import(self, node):
-    #     names = node.names
-    #     results = []
-    #     for alias in names:
-    #         name = alias.name
-    #         file_name = "%s.py" % os.path.join(self.input_directory_path, name)
-    #         compiler = Compiler(file_name, self.main_compiler)
-    #         import_call = compiler.import_me()
-    #         asname = ast.Name(alias.asname or name, ast.Store())
-    #         assign = ast.Assign([asname], JSCode(import_call))
-    #         results.append(assign)
-    #     return self.compile_node_list(results, ", ", "")
+            raise CompileError("Can't import nothing")
 
     def compile_ImportFrom(self, node):
         module = node.module
@@ -249,7 +243,7 @@ class Compiler:
             if isinstance(arg, ast.Str):
                 return arg.s
             else:
-                raise Exception("%s can only be called with a single string argument." % self.jseval_name)
+                raise CompileError("%s can only be called with a single string argument." % self.jseval_name)
         # Normal function call
         else:
             func = self.compile_node(func)
@@ -364,7 +358,7 @@ class Compiler:
         elif isinstance(ctx, ast.Load):
             pass
         else:
-            raise Exception("Can't compile attribute with context of type %s" % ctx.__class__.__name__)
+            raise CompileError("Can't compile attribute with context of type %s" % ctx.__class__.__name__)
 
         return "%s.%s" % (value, attr)
 
@@ -438,10 +432,12 @@ class Compiler:
 
     # Comparison operators
     def compile_Eq(self, node):
-        return "__python__.__eq__"
+        name = ast.Name("eq", ast.Load())
+        return self.compile_node(name)
 
     def compile_NotEq(self, node):
-        return "__python__.__not_eq__"
+        name = ast.Name("eq", ast.Load())
+        return "!%s" % self.compile_node(name)
 
     def compile_Gt(self, node):
         return ">"
@@ -460,6 +456,9 @@ class Compiler:
 
     def compile_IsNot(self, node):
         return "!=="
+
+    def compile_Pass(selfe, node):
+        return None
 
     # Primitives
     def compile_Num(self, node):
@@ -514,27 +513,41 @@ class Compiler:
         "static",
         "yield",
     )
+
+    python_keywords = {
+        'True': 'true',
+        'False': 'false',
+        'None': 'null',
+    }
+
     def compile_Name(self, node):
         id = node.id
         ctx = node.ctx
+
+        if id in self.python_keywords:
+            return self.python_keywords[id]
+
         is_super = id == "super"
         if id in self.javascript_reserved_words:
             id = "$%s" % id
             node = ast.Name(id, ctx)
 
         if isinstance(ctx, ast.Store):
-            active_ctx = self.context_stack[-1]
-            if active_ctx.is_global(node):
-                active_ctx = self.context_stack[0]
-            active_ctx.set(node)
+            try:
+                active_ctx = self.context_stack[-1]
+                if active_ctx.is_global(node):
+                    active_ctx = self.context_stack[0]
+                    active_ctx.set(node)
+            except IndexError:
+                active_ctx = None
         else:
             active_ctx = self.context_stack.find(node) or (self.context_stack and self.context_stack[0])
 
         is_local_module_name = node is self.local_module_name
-        if not is_local_module_name and active_ctx and active_ctx.is_module_context():
+        if not is_local_module_name and active_ctx and active_ctx.is_module_context() and active_ctx.get(node):
             local_module_name = self.compile_node(self.local_module_name)
             return "%s.%s" % (local_module_name, id)
-        elif not is_super and active_ctx and active_ctx.is_class_context():
+        elif not is_super and active_ctx and active_ctx.is_class_context() and active_ctx.get(node):
             return "%s.%s.%s" % (active_ctx.class_name, "prototype", id)
         else:
             self.main_compiler.builtins.use(id)

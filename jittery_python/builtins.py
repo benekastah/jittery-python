@@ -23,6 +23,13 @@ class Builtins:
             method_text = inspect.getsource(method)
             # Dedent by one
             method_text = self.re_dedent1.sub('', method_text)
+
+            # This makes sure that we use any other builtins that this builtin method requires.
+            nodes = ast.parse(method_text)
+            for node in ast.walk(nodes):
+                if isinstance(node, ast.Name):
+                    self.use(node.id)
+
             self.module_text += method_text
 
     def _clone(o):
@@ -34,11 +41,14 @@ class Builtins:
             return jseval("new f()")
 
     def _each(o, fn):
-        jseval("for (var prop in o) {" \
-               "  if (o.hasOwnProperty(prop)) {" \
-               "    fn(prop, o[prop]);"
-               "  }"
+        jseval("for (var prop in o) { " \
+               "if (o.hasOwnProperty(prop)) { " \
+               "fn(prop, o[prop]); "
+               "} "
                "}")
+
+    def eq(a, b):
+        pass
 
     def isinstance(item, cls):
         if item and jseval("item instanceof cls") and jseval("typeof item") == cls.name:
@@ -57,3 +67,6 @@ class Builtins:
         _each(self, each_method)
 
         return self
+
+    class list(Array):
+        pass

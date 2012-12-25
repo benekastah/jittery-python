@@ -68,11 +68,6 @@ class Context:
 
 
 class ContextStack(list):
-    def __getitem__(self, index):
-        if len(self) == 0:
-            raise Exception("Trying to get context from empty ContextStack")
-        super().__getitem__(index)
-
     def new(self, class_name = None):
         ctx = Context(self, class_name)
         self.append(ctx)
