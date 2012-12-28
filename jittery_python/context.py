@@ -21,12 +21,6 @@ class Context:
         return id in self.locals or id in self.arguments
 
     def set(self, key, include = True, ls = None):
-        if self.is_module_context():
-            return
-        elif self.is_class_context():
-            if "$super" not in (key, key.id):
-                return
-
         if ls is None:
             ls = self.locals
 
@@ -44,6 +38,13 @@ class Context:
         elif not include and already_in_ls:
             index = ls.index(id)
             del ls[index]
+
+    def get_vars(self, should_get_vars = None):
+        from jittery_python.compiler import JSCode
+        if should_get_vars or (should_get_vars != False and not self.is_module_context() and not self.is_class_context()):
+            if self.locals:
+                return JSCode("var %s" % ', '.join(self.locals))
+        return JSCode("")
 
     def set_global(self, key):
         id = self.get_key_id(key)

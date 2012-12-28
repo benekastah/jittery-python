@@ -137,6 +137,11 @@ class Compiler:
                 code = self.modules
 
             compiled = ";\n\n".join(code) + ";\n"
+            if not self.bare:
+                compiled = "(function () {\n\n" \
+                           "%s\n" \
+                           "})();" % compiled
+
             if self.output_file_path:
                 output_f = open(self.output_file_path, 'w+')
                 output_f.write(compiled)
@@ -157,7 +162,7 @@ class Compiler:
     def compile_node_list(self, nodes, joiner = ";\n", trailing = ";"):
         compiled = [self.compile_node(n) for n in nodes]
         result = joiner.join(filter(lambda x: x, compiled))
-        if trailing:
+        if trailing and not result.endswith(trailing):
             result += trailing
         return result
 
@@ -175,8 +180,9 @@ class Compiler:
             call = ast.Call(to_call, [module_name, func], None, None, None)
             result = self.compile_node(call)
         else:
-            self.context_stack.new()
+            context = self.context_stack.new()
             result = self.compile_node(node.body)
+            result = self.compile_statement_list([context.get_vars(True), JSCode(result)])
             self.context_stack.pop()
 
         if self.is_builtins:
@@ -534,7 +540,7 @@ class Compiler:
                 active_ctx = self.context_stack[-1]
                 if active_ctx.is_global(node):
                     active_ctx = self.context_stack[0]
-                    active_ctx.set(node)
+                active_ctx.set(node)
             except IndexError:
                 active_ctx = None
         else:
@@ -543,10 +549,10 @@ class Compiler:
         is_local_module_name = node is self.local_module_name
         if is_super:
             return "self.%s" % id
-        elif not is_local_module_name and active_ctx and active_ctx.is_module_context() and active_ctx.get(node):
+        elif not is_local_module_name and not self.is_builtins and active_ctx and active_ctx.is_module_context() and active_ctx.get(node):
             local_module_name = self.compile_node(self.local_module_name)
             return "%s.%s" % (local_module_name, id)
-        elif not is_super and active_ctx and active_ctx.is_class_context() and active_ctx.get(node):
+        elif active_ctx and active_ctx.is_class_context() and active_ctx.get(node):
             return "%s.%s.%s" % (active_ctx.class_name, "prototype", id)
         else:
             self.main_compiler.builtins.use(id)
@@ -575,14 +581,15 @@ class Compiler:
         target = node.target
         iter = node.iter
         body = node.body
+        orelse = node.orelse
 
-        counter = 'i'
-        len = 'len'
-        counter_store = self.gensym(counter, ast.Store())
-        counter_load = self.gensym(counter, ast.Load())
-        len_store = self.gensym(len, ast.Store())
-        len_load = self.gensym(len, ast.Load())
-        for_condition = "(%(counter_store)s = 0, %(len_store)s = %(iter)s.length;" \
+        iter_store = self.gensym("iter", ast.Store())
+        iter_load = ast.Name(iter_store.id, ast.Load())
+        counter_store = self.gensym('i', ast.Store())
+        counter_load = ast.Name(counter_store.id, ast.Load())
+        len_store = self.gensym('len', ast.Store())
+        len_load = ast.Name(len_store.id, ast.Load())
+        for_condition = "(%(counter_store)s = 0, %(iter_store)s = %(iter)s, %(len_store)s = %(iter_load)s.length;" \
                         " %(counter_load)s < %(len_load)s;" \
                         " %(counter_store)s++)" % {
                             'counter_store': self.compile_node(counter_store),
@@ -590,16 +597,50 @@ class Compiler:
                             'len_store': self.compile_node(len_store),
                             'len_load': self.compile_node(len_load),
                             'iter': self.compile_node(iter),
+                            'iter_store': self.compile_node(iter_store),
+                            'iter_load': self.compile_node(iter_load),
                         }
 
-        target_assign = ast.Assign([target], ast.Subscript(iter, counter_load, None))
+        target_assign = ast.Assign([target], ast.Subscript(iter_load, counter_load, None))
         body = [target_assign] + body
+        if orelse:
+            _if = ast.If(ast.BinOp(counter_load, ast.Eq(), len_load), orelse)
+            body = body + [_if]
+
         return 'for %(for_condition)s {\n%(indent1)s%(body)s\n%(indent0)s}' % {
             'for_condition': for_condition,
             'indent0': indent0,
             'indent1': indent1,
             'body': self.compile_statement_list(body)
         }
+
+    def compile_ListComp(self, node):
+        elt = node.elt
+        generators = node.generators
+
+        result_name = self.gensym("result", ast.Store())
+        result_assign = ast.Assign([result_name], ast.List([], ast.Store()))
+        result_name = ast.Name(result_name.id, ast.Load())
+
+        append_result = ast.Call(ast.Attribute(result_name, "push", ast.Load()), [elt], None, None, None)
+        body = append_result
+        for generator in reversed(generators):
+            ifs = generator.ifs
+            compare = None
+            for _if in ifs:
+                if not compare:
+                    compare = _if
+                else:
+                    compare = ast.BinOp(compare, ast.And(), _if)
+            if compare:
+                body = ast.If(compare, [body], None)
+
+            body = ast.For(generator.target, generator.iter, [body], None)
+
+        ret = ast.Return(result_name)
+        func = ast.FunctionDef(None, [], [result_assign, body, ret], None, None)
+        call = ast.Call(func, [], None, None, None)
+        return self.compile_node(call)
 
     def compile_Raise(self, node):
         exc = node.exc
@@ -636,34 +677,47 @@ class Compiler:
         return self.compile_node(func)
 
     def compile_FunctionDef(self, node, class_name = None):
+        # Compile the function name outside of the function context.
+        if node.name:
+            name = ast.Name(node.name, ast.Store())
+            c_name = self.compile_node(name)
+            name = JSCode(c_name)
+        else:
+            name = None
+
         ctx = self.context_stack.new(class_name = class_name)
         indent0 = self.indent()
         indent1 = self.indent(1)
 
+        print("Warning: functions can't handle varargs or kwargs yet")
         if node.args:
+            node_args = node.args
+            # vararg = node_args.vararg
             args = []
-            for arg in node.args.args:
+            for arg in node_args.args:
                 a = arg.arg
                 ctx.set_argument(a)
                 args.append(a)
             args = ', '.join(args)
         else:
             args = ''
-        body = self.compile_statement_list(node.body)
 
-        declare_locals = ", ".join(ctx.locals)
-        if declare_locals:
-            declare_locals = "%svar %s;\n" % (indent1, declare_locals)
+        # decorator_list = node.decorator_list
+        # returns = node.returns
+
+        body = self.compile_statement_list(node.body)
+        declare_locals = ctx.get_vars()
+        body = self.compile_statement_list([declare_locals, JSCode(body)])
 
         value = ("function (%s) {\n%s"
-                 "%s%s\n"
-                 "%s}") % (args, declare_locals, indent1, body, indent0)
+                 "%s\n"
+                 "%s}") % (args, indent1, body, indent0)
         self.context_stack.pop()
 
         self.indent(-1)
 
-        if node.name:
-            targets = [ast.Name(node.name, ast.Store())]
+        if name:
+            targets = [name]
             assign = ast.Assign(targets, JSCode(value))
             return self.compile_node(assign)
         else:
@@ -676,7 +730,7 @@ class Compiler:
         name = node.name
         body = node.body
         instantiate = self.compile_node(ast.Name("_class_instantiate", ast.Load()))
-        cls = JSCode("function %s() { return %s(this, arguments); }" % (name, instantiate))
+        cls = JSCode("function %(class_name)s() { return %(instantiate)s(this, arguments, %(class_name)s); }" % {'class_name': name, 'instantiate': instantiate})
 
         if not node.bases:
             node.bases = [ast.Name('object', ast.Load())]

@@ -45,6 +45,7 @@ class Builtins:
 
             self.module_text += item_text
 
+    # Utilities
     class Exception(Error): pass
 
     def _clone(o):
@@ -62,11 +63,23 @@ class Builtins:
                "} "
                "}")
 
+    def _typeof(o, t):
+        type = Object.prototype.toString.call(o)
+        type = type.substring(8, type.length - 1).toLowerCase()
+        return t is type
+
+    # Internal implementation functions
     def __eq__(a, b):
         pass
 
+    # Public functions
+    def print(*objects, sep=' ', end='\n', file=None, flush=False):
+        string = sep.join([str(o) for o in objects]) + end
+        console.log(string)
+
+    # Class stuff
     def isinstance(item, cls):
-        if item and jseval("item instanceof cls") and jseval("typeof item") == cls.name:
+        if item and (jseval("item instanceof cls") or jseval("typeof item") == cls.name):
             return True
         else:
             return False
@@ -76,7 +89,7 @@ class Builtins:
         child.prototype.constructor = child
         child.prototype.super = object.prototype.super.bind(null, parent)
 
-    def _class_instantiate(self, cls, child_self = None):
+    def _class_instantiate(self, args, cls, child_self = None):
         if not isinstance(self, cls):
             self = _clone(cls.prototype)
 
@@ -87,12 +100,16 @@ class Builtins:
 
         _each(cls.prototype, each_method)
 
+        if _typeof(self.__init__, "function") and args is not None:
+            args = [self] + args
+            self.__init__(*args)
+
         return self
 
     class object:
         def super(parent, self):
             if not self.__super__:
-                self.__super__ = _class_instantiate(None, parent, self)
+                self.__super__ = _class_instantiate(None, None, parent, self)
             return self.__super__
 
     class ModifyError(Exception): pass
