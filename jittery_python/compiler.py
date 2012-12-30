@@ -188,7 +188,7 @@ class Compiler:
             module_name = ast.Str(self.module_name)
             args = ast.arguments([ast.arg(self.local_module_name.id, None)], None, None, None, None, None, None, None)
             func = ast.FunctionDef(name = '', args = args, body = body, decorator_list = [], returns = None)
-            to_call = JSCode("__python__.register_module")
+            to_call = ast.Name("__registermodule__", ast.Load())
             call = ast.Call(to_call, [module_name, func], None, None, None)
             result = self.compile_node(call)
         else:
@@ -574,7 +574,7 @@ class Compiler:
         elif not is_local_module_name and not self.is_builtins and active_ctx and active_ctx.is_module_context() and active_ctx.get(node):
             local_module_name = self.compile_node(self.local_module_name)
             return "%s.%s" % (local_module_name, id)
-        elif active_ctx and active_ctx.is_class_context() and active_ctx.get(node):
+        elif active_ctx and active_ctx.is_class_context() and active_ctx.get(node) and id is not active_ctx.class_name:
             return "%s.%s.%s" % (active_ctx.class_name, "prototype", id)
         else:
             self.main_compiler.builtins.use(id)
@@ -691,6 +691,79 @@ class Compiler:
         call = ast.Call(func, [], None, None, None)
         return self.compile_node(call)
 
+    def compile_Try(self, node):
+        body = node.body
+        handlers = node.handlers
+        orelse = node.orelse
+        finalbody = node.finalbody
+
+        indent0 = self.indent()
+        indent1 = self.indent(1)
+
+        c_handlers = []
+        context = self.context_stack.new()
+        err_store = self.gensym("err", ast.Store())
+        err_load = ast.Name(err_store.id, ast.Load())
+        c_err_store = self.compile_node(err_store)
+
+        for handler in handlers:
+            name = handler.name
+            _type = handler.type
+            _body = handler.body
+
+            if name:
+                assign = ast.Assign([name], err_load)
+                _body = [assign] + _body
+            else:
+                name = err_load
+
+            if _type:
+                _isinstance = ast.Name("isinstance", ast.Load())
+                call = ast.Call(_isinstance, [name, _type])
+                _body = ast.If(call, _body, None)
+
+            c_handlers.append(_body)
+            if not _type:
+                break
+
+        c_handlers = self.compile_statement_list(c_handlers)
+        self.context_stack.pop()
+
+        if orelse:
+            diderr_store = self.gensym("diderr", ast.Store())
+            diderr_load = ast.Name(diderr_store.id, ast.Load())
+            assign = ast.Assign([diderr_store], ast.Name("True", ast.Load()))
+            c_handlers = [assign] + c_handlers
+            _if = ast.If(diderr_load, orelse)
+            finalbody = finalbody + [_if]
+
+        if finalbody:
+            _finally = " finally {\n%(indent1)s" \
+                       "%(finally)s\n%(indent0)s" \
+                       "}" % {
+                           'finally': self.compile_statement_list(finalbody),
+                           'indent0': indent0,
+                           'indent1': indent1,
+                       }
+        else:
+            _finally = ""
+
+        result = "try {\n%(indent1)s" \
+                 "%(body)s\n%(indent0)s" \
+                 "} catch (%(err_store)s) {\n%(indent1)s" \
+                 "%(handlers)s\n%(indent0)s" \
+                 "}%(finally)s"% {
+                     'body': self.compile_statement_list(body),
+                     'err_store': c_err_store,
+                     'handlers': c_handlers,
+                     'finally': _finally,
+                     'indent1': indent1,
+                     'indent0': indent0,
+                 }
+
+        self.indent(-1)
+        return result
+
     def compile_Raise(self, node):
         exc = node.exc
         cause = node.cause
@@ -702,11 +775,30 @@ class Compiler:
             ctx.set_global(name)
 
     def compile_Dict(self, node):
-        keys = self.compile_node(ast.List(node.keys, ast.Load()))
-        values = self.compile_node(ast.List(node.values, ast.Load()))
-        dictcls = ast.Name('dict', ast.Load())
-        call = ast.Call(dictcls, [keys, values], None, None, None)
-        return self.compile_ClassCall(call)
+        keys = node.keys
+        values = node.values
+
+        idx = 0
+        length = len(keys)
+        kvs = []
+        while idx < length:
+            key = keys[idx]
+            value = values[idx]
+            kvs.append("%s: %s" % (self.compile_node(key), self.compile_node(value)))
+
+        if kvs:
+            indent0 = self.indent()
+            indent1 = self.indent(1)
+            result = "{\n%(indent1)s%(kvs)s\n%(indent0)s}" % {
+                'kvs': (',\n%s' % indent1).join(kvs),
+                'indent0': indent0,
+                'indent1': indent1,
+            }
+            self.indent(-1)
+        else:
+            result = "{}"
+
+        return result
 
     def compile_Array(self, node_list):
         elts = self.compile_node_list(node_list, ", ", "")
@@ -787,7 +879,7 @@ class Compiler:
 
         self.indent(-1)
 
-        if name:
+        if name and not true_named_function:
             targets = [name]
             assign = ast.Assign(targets, JSCode(value))
             return self.compile_node(assign)
@@ -802,7 +894,7 @@ class Compiler:
         body = node.body
 
         instantiate = ast.Name("__class_instantiate__", ast.Load())
-        instantiate_call = ast.Call(instantiate, [JSCode("this"), JSCode("arguments")], None, None, None)
+        instantiate_call = ast.Call(instantiate, [ast.Name(name, ast.Load()), JSCode("this"), JSCode("arguments")], None, None, None)
         ret = ast.Return(instantiate_call)
         cls = ast.FunctionDef(name, [], [ret], None, None)
         self.indent(1)

@@ -4,16 +4,18 @@ import ast, inspect, re
 # If these are missing we get an error.
 class Array: pass
 class Error: pass
+def jseval(*a): pass
 
 class Builtins:
     re_dedent1 = re.compile(r"^(    |\t)", re.MULTILINE)
 
     def __init__(self):
         self.usedict = {}
+        self.using = []
         self.module_text = ""
 
     def use(self, name):
-        if name is "use" or name not in Builtins.__dict__:
+        if name in ("use", "__init__") or name not in Builtins.__dict__:
             return
 
         try:
@@ -21,8 +23,10 @@ class Builtins:
         except KeyError:
             used = False
 
-        if not used:
+        if not used and name not in self.using:
+            self.using.append(name)
             self.usedict[name] = True
+
             try:
                 item = self.__getattribute__(name)
             except AttributeError:
@@ -32,18 +36,23 @@ class Builtins:
             # Dedent by one
             item_text = self.re_dedent1.sub('', item_text)
 
+            # If this is a class, include everything that starts with __class_.
+            if isinstance(item, type):
+                self.use("object")
+                for attr in dir(self):
+                    if attr.startswith("__class_"):
+                        self.use(attr)
+
             # This makes sure that we use any other builtins that this builtin item requires.
             nodes = ast.parse(item_text)
             for node in ast.walk(nodes):
                 if isinstance(node, ast.Name):
                     self.use(node.id)
-
-            if isinstance(item, type):
-                for attr in dir(self):
-                    if attr.startswith("__class_"):
-                        self.use(attr)
+                elif isinstance(node, ast.Eq) or isinstance(node, ast.NotEq):
+                    self.use("__eq__")
 
             self.module_text += item_text
+            self.using.pop()
 
     # Utilities
     class Exception(Error): pass
@@ -97,6 +106,31 @@ class Builtins:
                 idx += step
             return ret
 
+    class __ModuleList__:
+        _module_fns = {}
+        _included_modules = {}
+
+        def __register__(self, name, fn):
+            self._module_fns[name] = fn
+
+        def __import__(self, name):
+            m = self._included_modules[name]
+            if not m:
+                fn = self._module_fns[name]
+                m = {}
+                m.__name__ = name
+                fn(m)
+                self._included_modules[name] = m
+            return m
+
+        jseval("return __ModuleList__()")
+
+    def __registermodule__(name, fn):
+        __ModuleList__.__register__(name, fn)
+
+    def __import__(name):
+        return __ModuleList__.__import(name)
+
     # Public functions
     def str(o):
         if not _null(o) and _typeof(o.toString) is "function":
@@ -116,11 +150,14 @@ class Builtins:
             return False
 
     def __class_extend__(child, parent):
-        child.prototype = _clone(parent.prototype)
-        child.prototype.constructor = child
-        child.prototype.super = object.prototype.super.bind(null, parent)
+        if child is not parent:
+            child.prototype = _clone(parent.prototype)
+            child.prototype.constructor = child
+            child.prototype.super = _super.bind(null, parent)
+        else: # child and parent are both `object`
+            child.prototype.super = _super
 
-    def __class_instantiate__(self, args, cls, child_self = None):
+    def __class_instantiate__(cls, self, args, child_self = None):
         if not isinstance(self, cls):
             self = _clone(cls.prototype)
 
@@ -137,11 +174,14 @@ class Builtins:
 
         return self
 
-    class object:
-        def super(parent, self):
-            if not self.__super__:
-                self.__super__ = __class_instantiate__(None, None, parent, self)
+    def _super(parent, self):
+        if not self.__super__:
+            self.__super__ = __class_instantiate__(parent, None, None, self)
             return self.__super__
+
+    class object:
+        def __init__(self):
+            pass
 
     class ModifyError(Exception): pass
 

@@ -85,11 +85,11 @@ tuple = function () {
     return __class_instantiate__(this, arguments);
   };
   tuple.prototype.__init__ = function (self, iterable) {
-    var __self__, sup, __i_76387__, __len_87502__, __iter_50648__, item, len, index;
+    var __self__, sup, __i_13926__, __len_98788__, __iter_46440__, item, len, index;
     __self__ = arguments[0];
     sup = __self__.$super();
-    for (__i_76387__ = 0, __iter_50648__ = iterable, __len_87502__ = __iter_50648__.length; __i_76387__ < __len_87502__; __i_76387__++) {
-      item = __iter_50648__[__i_76387__];
+    for (__i_13926__ = 0, __iter_46440__ = iterable, __len_98788__ = __iter_46440__.length; __i_13926__ < __len_98788__; __i_13926__++) {
+      item = __iter_46440__[__i_13926__];
       len = sup.push(item);
       index = len - 1;
       self.__defineSetter__(index, self._modify_err);
@@ -117,13 +117,13 @@ str = function (o) {
 print = function () {
   var string;
   string = sep.join(function () {
-    var __result_17470__, __i_3780__, __len_84125__, __iter_76934__, o;
-    __result_17470__ = [];
-    for (__i_3780__ = 0, __iter_76934__ = objects, __len_84125__ = __iter_76934__.length; __i_3780__ < __len_84125__; __i_3780__++) {
-      o = __iter_76934__[__i_3780__];
-      __result_17470__.push(str(o));
+    var __result_1029__, __i_79332__, __len_94336__, __iter_50065__, o;
+    __result_1029__ = [];
+    for (__i_79332__ = 0, __iter_50065__ = objects, __len_94336__ = __iter_50065__.length; __i_79332__ < __len_94336__; __i_79332__++) {
+      o = __iter_50065__[__i_79332__];
+      __result_1029__.push(str(o));
     };
-    return __result_17470__;
+    return __result_1029__;
   }()) + end;
   console.log(string);
 };
@@ -156,9 +156,9 @@ __slice__ = function (ls, lower, upper, step) {
   };
 };;
 
-__python__.register_module("__main__", function (____main___42714__) {
-  ____main___42714__.a = new tuple([1, 2, 3, 4, 5, 6, 7]);
-  print(____main___42714__._a = __slice__(____main___42714__.a, null, null, 4));
+__python__.register_module("__main__", function (____main___92927__) {
+  ____main___92927__.a = new tuple([1, 2, 3, 4, 5, 6, 7]);
+  print(____main___92927__._a = __slice__(____main___92927__.a, null, null, 4));
 });
 
 __import__("__main__");
