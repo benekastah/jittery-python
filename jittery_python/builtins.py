@@ -85,8 +85,14 @@ class Builtins:
         print("Warning: == and != are not yet properly implemented. Currently an is or is not operation is used instead.")
         return a is b
 
+    def __getindex__(ls, idx):
+        if _typeof(idx) is "number":
+            if idx < 0:
+                idx += len(ls)
+        ls[idx]
+
     def __slice__(ls, lower, upper, step):
-        if step is None or step is 1:
+        if _typeof(ls) is "array" and step is None or step is 1:
             if upper:
                 return ls.slice(lower or 0, upper)
             elif lower:
@@ -137,6 +143,9 @@ class Builtins:
             return o.toString()
         else:
             return "" + o
+
+    def len(ls):
+        return ls.length
 
     def print(*objects, sep=' ', end='\n', file=None, flush=False):
         string = sep.join([str(o) for o in objects]) + end

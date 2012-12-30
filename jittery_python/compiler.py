@@ -1,5 +1,6 @@
 import os, sys, re, random
 import ast
+from jittery_python import utils
 from jittery_python.utils import print_node
 from jittery_python.context import Context, ContextStack
 from jittery_python.builtins import Builtins
@@ -251,9 +252,12 @@ class Compiler:
         return node.code
 
     jseval_name = "jseval"
-    def compile_Call(self, node):
+    def compile_Call(self, node, no_kwargs = False):
         func = node.func
         args = node.args
+        starargs = node.starargs
+        keywords = node.keywords
+        kwargs = node.kwargs
 
         # jseval
         if isinstance(func, ast.Name) and func.id == self.jseval_name:
@@ -264,9 +268,30 @@ class Compiler:
                 raise CompileError("%s can only be called with a single string argument." % self.jseval_name)
         # Normal function call
         else:
-            func = self.compile_node(func)
-            args = self.compile_node_list(args, ", ", "")
-            return "%s(%s)" % (func, args)
+            if func is "__test__":
+                print_node(node)
+
+            if kwargs:
+                if keywords:
+                    fn = ast.Name("__merge__", ast.Load())
+                    d = utils.keywords_to_dict(keywords)
+                    kwargs = ast.Call(fn, [kwargs, d], None, None, None)
+            else:
+                kwargs = ast.Dict([], [])
+
+            if starargs:
+                args = utils.list_to_ast(args)
+                concat = ast.Attribute(args, "concat", ast.Load())
+                concatargs = [starargs, kwargs] if not no_kwargs else [starargs]
+                args = ast.Call(concat, concatargs, None, None, None)
+                args = JSCode(self.compile_Call(args, no_kwargs = True))
+                _apply = ast.Attribute(func, "apply", ast.Load())
+                call = ast.Call(_apply, [ast.Name("None", ast.Load()), args], None, None, None)
+                return self.compile_Call(call, no_kwargs = True)
+            else:
+                if not no_kwargs:
+                    args = args + [kwargs]
+                return "%s(%s)" % (self.compile_node(func), self.compile_node_list(args, ", ", ""))
 
     def compile_ClassCall(self, call):
         return "new %s" % self.compile_node(call)
@@ -377,19 +402,24 @@ class Compiler:
 
         return "%s.%s" % (value, attr)
 
-    def compile_Subscript(self, node):
+    def compile_Subscript(self, node, native_index = False):
         value = node.value
         slice = node.slice
         if isinstance(slice, ast.Index):
-            return "%s%s" % (self.compile_node(value), self.compile_node(slice))
+            return self.compile_Index(slice, value = value, native_index = native_index)
         elif isinstance(slice, ast.Slice):
             return self.compile_Slice(slice, value = value)
         else:
             raise CompilerError("Can't compile subscript unless the slice node is either ast.Index or ast.Slice")
 
 
-    def compile_Index(self, node):
-        return "[" + self.compile_node(node.value) + "]"
+    def compile_Index(self, node, value, native_index = False):
+        if not native_index:
+            fn = ast.Name("__getindex__", ast.Load())
+            call = ast.Call(fn, [value, node.value], None, None, None)
+            return self.compile_node(call)
+        else:
+            return "%s[%s]" % (self.compile_node(value), self.compile_node(node.value))
 
     def compile_Slice(self, node, value):
         _None = ast.Name("None", ast.Load())
@@ -818,6 +848,9 @@ class Compiler:
         return self.compile_node(func)
 
     def compile_FunctionDef(self, node, class_name = None, true_named_function = False):
+        if node.name == "__test__":
+            print_node(node)
+
         # Compile the function name outside of the function context.
         is_class_fn = False
         if node.name:
@@ -841,23 +874,85 @@ class Compiler:
         indent0 = self.indent()
         indent1 = self.indent(1)
 
-        print("Warning: functions can't handle varargs or kwargs yet")
+        body = node.body
+        annotations = {}
         if node.args:
+            jsarguments = JSCode("arguments")
             node_args = node.args
             # vararg = node_args.vararg
-            args = []
-            for arg in node_args.args:
+            args = node.args.args
+            argnames = []
+            argbody = []
+
+            kwarg = node.args.kwarg
+            if kwarg:
+                kwargdict = ast.Name(kwarg, ast.Load())
+
+                kwargannotation = node.args.kwargannotation
+                if kwargannotation:
+                    annotations[kwarg] = kwargannotation
+            else:
+                kwargdict = self.gensym("kwargdict", ast.Load())
+
+            # The last argument will always be the kwargs. Make this assignment in the body of the function.
+            kwargsubscript = ast.Subscript(jsarguments, ast.Index(JSCode("arguments.length-1")), ast.Load())
+            kwargsubscript = JSCode(self.compile_Subscript(kwargsubscript, native_index = True))
+            kwargassign = ast.Assign([ast.Name(kwargdict.id, ast.Store())], kwargsubscript)
+            argbody.append(kwargassign)
+
+            for arg in args:
                 a = arg.arg
                 ctx.set_argument(a)
-                args.append(a)
-            args = ', '.join(args)
+                argnames.append(a)
+
+                subscript = ast.Subscript(kwargdict, ast.Index(ast.Str(a)), ast.Load())
+                subscript = JSCode(self.compile_Subscript(subscript, native_index = True))
+                assign = ast.Assign([ast.Name(a, ast.Store())], subscript)
+                _if = ast.If(JSCode("%s === void 0" % a), [assign], None)
+                argbody.append(_if)
+
+                annotation = arg.annotation
+                if annotation:
+                    annotations[a] = annotation
+
+            vararg = node.args.vararg
+            if vararg:
+                start = ast.Num(len(argnames))
+                end = ast.Num(-1)
+                _slice = ast.Slice(start, end, None)
+                gather = ast.Subscript(jsarguments, _slice, ast.Load())
+                assign = ast.Assign([ast.Name(vararg, ast.Store())], gather)
+                argbody.append(assign)
+
+                varargannotation = node.args.varargannotation
+                if varargannotation:
+                    annotations[vararg] = varargannotation
+
+            kwonlyargs = node.args.kwonlyargs
+            if kwonlyargs:
+                for arg in kwonlyargs:
+                    a = arg.arg
+                    subscript = ast.Subscript(kwargdict, ast.Index(ast.Str(a)), ast.Load())
+                    subscript = JSCode(self.compile_Subscript(subscript, native_index = True))
+                    assign = ast.Assign([ast.Name(a, ast.Store())], subscript)
+                    argbody.append(assign)
+
+                    annotation = arg.annotation
+                    if annotation:
+                        annotations[a] = annotation
+
+            returns = node.returns
+            if returns:
+                annotations["return"] = returns
+
+            args = ', '.join(argnames)
+            body = argbody + body
         else:
             args = ''
 
         # decorator_list = node.decorator_list
         # returns = node.returns
 
-        body = node.body
         if has_super:
             _self = ast.Name("__self__", ast.Store())
             _self_assign = ast.Assign([_self], JSCode("arguments[0]"))
@@ -879,12 +974,30 @@ class Compiler:
 
         self.indent(-1)
 
+        if annotations:
+            keys = []
+            values = []
+            for k, v in annotations:
+                keys.append(k)
+                values.append(v)
+                annotations = ast.Dict(keys, values)
+
+            if not name:
+                name = self.gensym("func", ast.Store())
+
         if name and not true_named_function:
-            targets = [name]
-            assign = ast.Assign(targets, JSCode(value))
-            return self.compile_node(assign)
+            assign = ast.Assign([name], JSCode(value))
+            result = self.compile_node(assign)
         else:
-            return value
+            result = value
+
+        if annotations:
+            n = ast.Name(name.id, ast.Load())
+            attr = ast.Attribute(n, "__annotations__", ast.Store())
+            assign = ast.Assign([attr], annotations)
+            return "(" + self.compile_node_list([JSCode(result), assign, n]) + ")"
+        else:
+            return result
 
     def compile_Return(self, node):
         return "return %s" % self.compile_node(node.value)
