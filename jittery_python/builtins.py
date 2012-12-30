@@ -13,7 +13,7 @@ class Builtins:
         self.module_text = ""
 
     def use(self, name):
-        if name is "use":
+        if name is "use" or name not in Builtins.__dict__:
             return
 
         try:
@@ -40,7 +40,7 @@ class Builtins:
 
             if isinstance(item, type):
                 for attr in dir(self):
-                    if attr.startswith("_class_"):
+                    if attr.startswith("__class_"):
                         self.use(attr)
 
             self.module_text += item_text
@@ -68,11 +68,42 @@ class Builtins:
         type = type.substring(8, type.length - 1).toLowerCase()
         return t is type
 
+    def _null(o):
+        return jseval("o == null")
+
     # Internal implementation functions
     def __eq__(a, b):
-        pass
+        print("Warning: == and != are not yet properly implemented. Currently an is or is not operation is used instead.")
+        return a is b
+
+    def __slice__(ls, lower, upper, step):
+        if step is None or step is 1:
+            if upper:
+                return ls.slice(lower or 0, upper)
+            elif lower:
+                return ls.slice(lower)
+            else:
+                return ls.slice()
+        else:
+            idx = lower or 0
+            length = len(ls)
+            if upper is not None:
+                endidx = upper
+            else:
+                endidx = length
+            ret = []
+            while idx < length or idx >= endidx:
+                ret.push(ls[idx])
+                idx += step
+            return ret
 
     # Public functions
+    def str(o):
+        if not _null(o) and _typeof(o.toString) is "function":
+            return o.toString()
+        else:
+            return "" + o
+
     def print(*objects, sep=' ', end='\n', file=None, flush=False):
         string = sep.join([str(o) for o in objects]) + end
         console.log(string)
@@ -84,12 +115,12 @@ class Builtins:
         else:
             return False
 
-    def _class_extend(child, parent):
+    def __class_extend__(child, parent):
         child.prototype = _clone(parent.prototype)
         child.prototype.constructor = child
         child.prototype.super = object.prototype.super.bind(null, parent)
 
-    def _class_instantiate(self, args, cls, child_self = None):
+    def __class_instantiate__(self, args, cls, child_self = None):
         if not isinstance(self, cls):
             self = _clone(cls.prototype)
 
@@ -109,7 +140,7 @@ class Builtins:
     class object:
         def super(parent, self):
             if not self.__super__:
-                self.__super__ = _class_instantiate(None, None, parent, self)
+                self.__super__ = __class_instantiate__(None, None, parent, self)
             return self.__super__
 
     class ModifyError(Exception): pass

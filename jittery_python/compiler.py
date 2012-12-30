@@ -26,9 +26,11 @@ class Compiler:
     function_ops = (ast.FloorDiv, ast.Pow, ast.Eq, ast.NotEq)
     re_py_ext = re.compile("(\.py)?$")
 
-    def __init__(self, input_path = None, output_path = None, input_text = None, main_compiler = None, module_name = None):
+    def __init__(self, input_path = None, output_path = None, input_text = None, main_compiler = None, module_name = None, print_module_result = False):
         self.indent_level = 0
         self.current_indent = ""
+
+        self.print_module_result = print_module_result
 
         self.context_stack = ContextStack()
 
@@ -172,16 +174,26 @@ class Compiler:
     def compile_Module(self, node):
         self.is_builtins = self.module_name == "builtins"
 
+        body = node.body
+        if self.print_module_result:
+            try:
+                last_body_item = body[-1]
+            except IndexError:
+                last_body_item = ast.Name("None", ast.Load())
+            print_fn = ast.Name("print", ast.Load())
+            last_body_item = ast.Call(print_fn, [last_body_item], None, None, None)
+            body = body[:-1] + [last_body_item]
+
         if not self.bare and not self.is_builtins:
             module_name = ast.Str(self.module_name)
             args = ast.arguments([ast.arg(self.local_module_name.id, None)], None, None, None, None, None, None, None)
-            func = ast.FunctionDef(name = '', args = args, body = node.body, decorator_list = [], returns = None)
+            func = ast.FunctionDef(name = '', args = args, body = body, decorator_list = [], returns = None)
             to_call = JSCode("__python__.register_module")
             call = ast.Call(to_call, [module_name, func], None, None, None)
             result = self.compile_node(call)
         else:
             context = self.context_stack.new()
-            result = self.compile_node(node.body)
+            result = self.compile_node(body)
             result = self.compile_statement_list([context.get_vars(True), JSCode(result)])
             self.context_stack.pop()
 
@@ -368,12 +380,25 @@ class Compiler:
     def compile_Subscript(self, node):
         value = node.value
         slice = node.slice
-        to_call = ast.Attribute(value, "__getitem__", ast.Load())
-        call = ast.Call(to_call, [slice], None, None, None)
-        return self.compile_node(call)
+        if isinstance(slice, ast.Index):
+            return "%s%s" % (self.compile_node(value), self.compile_node(slice))
+        elif isinstance(slice, ast.Slice):
+            return self.compile_Slice(slice, value = value)
+        else:
+            raise CompilerError("Can't compile subscript unless the slice node is either ast.Index or ast.Slice")
+
 
     def compile_Index(self, node):
-        return self.compile_node(node.value)
+        return "[" + self.compile_node(node.value) + "]"
+
+    def compile_Slice(self, node, value):
+        _None = ast.Name("None", ast.Load())
+        lower = node.lower or _None
+        upper = node.upper or _None
+        step = node.step or _None
+        fn = ast.Name("__slice__", ast.Load())
+        call = ast.Call(fn, [value, lower, upper, step], None, None, None)
+        return self.compile_node(call)
 
     # Binary operators
     def compile_Add(self, node):
@@ -535,20 +560,17 @@ class Compiler:
             id = "$%s" % id
             node = ast.Name(id, ctx)
 
-        if isinstance(ctx, ast.Store):
-            try:
-                active_ctx = self.context_stack[-1]
-                if active_ctx.is_global(node):
-                    active_ctx = self.context_stack[0]
-                active_ctx.set(node)
-            except IndexError:
-                active_ctx = None
-        else:
-            active_ctx = self.context_stack.find(node) or (self.context_stack and self.context_stack[0])
+        try:
+            active_ctx = self.context_stack.find(node)
+        except IndexError:
+            active_ctx = None
+
+        if active_ctx and isinstance(ctx, ast.Store):
+            active_ctx.set(node)
 
         is_local_module_name = node is self.local_module_name
         if is_super:
-            return "self.%s" % id
+            return "__self__.%s" % id
         elif not is_local_module_name and not self.is_builtins and active_ctx and active_ctx.is_module_context() and active_ctx.get(node):
             local_module_name = self.compile_node(self.local_module_name)
             return "%s.%s" % (local_module_name, id)
@@ -573,6 +595,30 @@ class Compiler:
         self.indent(-1)
 
         return 'if (%(test)s) {\n%(indent1)s%(body)s\n%(indent0)s}%(orelse)s' % {'test': test, 'body': body, 'orelse': orelse, 'indent0': indent0, 'indent1': indent1}
+
+    def compile_While(self, node):
+        test = node.test
+        body = node.body
+        orelse = node.orelse
+
+        indent0 = self.indent()
+        indent1 = self.indent(1)
+
+        if orelse:
+            _if = ast.If(test, orelse)
+            body = body + [_if]
+
+        result = ("while (%(test)s) {\n"
+                  "%(indent1)s%(body)s\n"
+                  "%(indent0)s}") % {
+                      'test': self.compile_node(test),
+                      'body': self.compile_statement_list(body),
+                      'indent0': indent0,
+                      'indent1': indent1,
+                  }
+
+        self.indent(-1)
+        return result
 
     def compile_For(self, node):
         indent0 = self.indent()
@@ -601,18 +647,21 @@ class Compiler:
                             'iter_load': self.compile_node(iter_load),
                         }
 
-        target_assign = ast.Assign([target], ast.Subscript(iter_load, counter_load, None))
+        target_assign = ast.Assign([target], ast.Subscript(iter_load, ast.Index(counter_load), ast.Load()))
         body = [target_assign] + body
         if orelse:
             _if = ast.If(ast.BinOp(counter_load, ast.Eq(), len_load), orelse)
             body = body + [_if]
 
-        return 'for %(for_condition)s {\n%(indent1)s%(body)s\n%(indent0)s}' % {
+        result = 'for %(for_condition)s {\n%(indent1)s%(body)s\n%(indent0)s}' % {
             'for_condition': for_condition,
             'indent0': indent0,
             'indent1': indent1,
             'body': self.compile_statement_list(body)
         }
+
+        self.indent(-1)
+        return result
 
     def compile_ListComp(self, node):
         elt = node.elt
@@ -676,14 +725,25 @@ class Compiler:
         func = ast.FunctionDef(name = None, args = node.args, body = [ret], decorator_list = None)
         return self.compile_node(func)
 
-    def compile_FunctionDef(self, node, class_name = None):
+    def compile_FunctionDef(self, node, class_name = None, true_named_function = False):
         # Compile the function name outside of the function context.
+        is_class_fn = False
         if node.name:
             name = ast.Name(node.name, ast.Store())
+            ctx = self.context_stack.find(name)
+            is_class_fn = ctx.is_class_context()
             c_name = self.compile_node(name)
             name = JSCode(c_name)
         else:
             name = None
+
+        has_super = False
+        if is_class_fn:
+            for body_node in node.body:
+                for child_node in ast.walk(body_node):
+                    if isinstance(child_node, ast.Name) and child_node.id in ('super', '$super'):
+                        has_super = True
+                        break
 
         ctx = self.context_stack.new(class_name = class_name)
         indent0 = self.indent()
@@ -705,13 +765,24 @@ class Compiler:
         # decorator_list = node.decorator_list
         # returns = node.returns
 
-        body = self.compile_statement_list(node.body)
+        body = node.body
+        if has_super:
+            _self = ast.Name("__self__", ast.Store())
+            _self_assign = ast.Assign([_self], JSCode("arguments[0]"))
+            body = [_self_assign] + body
+
+        body = self.compile_statement_list(body)
         declare_locals = ctx.get_vars()
         body = self.compile_statement_list([declare_locals, JSCode(body)])
 
-        value = ("function (%s) {\n%s"
+        if true_named_function:
+            true_fn_name = name or ""
+        else:
+            true_fn_name = ""
+
+        value = ("function %s(%s) {\n%s"
                  "%s\n"
-                 "%s}") % (args, indent1, body, indent0)
+                 "%s}") % (true_fn_name, args, indent1, body, indent0)
         self.context_stack.pop()
 
         self.indent(-1)
@@ -729,8 +800,14 @@ class Compiler:
     def compile_ClassDef(self, node):
         name = node.name
         body = node.body
-        instantiate = self.compile_node(ast.Name("_class_instantiate", ast.Load()))
-        cls = JSCode("function %(class_name)s() { return %(instantiate)s(this, arguments, %(class_name)s); }" % {'class_name': name, 'instantiate': instantiate})
+
+        instantiate = ast.Name("__class_instantiate__", ast.Load())
+        instantiate_call = ast.Call(instantiate, [JSCode("this"), JSCode("arguments")], None, None, None)
+        ret = ast.Return(instantiate_call)
+        cls = ast.FunctionDef(name, [], [ret], None, None)
+        self.indent(1)
+        cls = JSCode(self.compile_FunctionDef(cls, true_named_function = True))
+        self.indent(-1)
 
         if not node.bases:
             node.bases = [ast.Name('object', ast.Load())]
@@ -738,7 +815,7 @@ class Compiler:
             raise CompileError("Multiple inheritance is not currently supported")
 
         basename = node.bases[0]
-        func = ast.Name("_class_extend", ast.Load())
+        func = ast.Name("__class_extend__", ast.Load())
         base = ast.Call(func, [JSCode(name), basename], None, None, None)
 
         ret = ast.Return(JSCode(name))

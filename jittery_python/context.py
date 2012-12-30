@@ -76,6 +76,18 @@ class ContextStack(list):
 
     def find(self, name):
         id = name.id
-        for ctx in reversed(self):
-            if ctx.get(id):
-                return ctx
+        ctx = name.ctx
+        if isinstance(ctx, ast.Store):
+            context = self[-1]
+        else:
+            context = None
+            for c in reversed(self):
+                if c.get(id):
+                    context = c
+                    break
+            if not context:
+                context = self[0]
+        if context.is_global(name):
+            return self[0]
+        else:
+            return context
