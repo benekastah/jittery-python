@@ -12,6 +12,9 @@ class JSCode:
     def __str__(self):
         return self.code
 
+# This class is used to force a local variable in a class or module definition, where exporting the variable is the default.
+class StoreLocal(ast.Store): pass
+
 def compile(text = None, file = None, bare = None):
     compiler = Compiler(input_text = text, input_path = file)
     return compiler.compile(bare = bare)
@@ -24,8 +27,10 @@ class Compiler:
     megabyte = 1024 * kilobyte
     max_file_size = 100 * megabyte
     default_indent = "  "
-    function_ops = (ast.FloorDiv, ast.Pow, ast.Eq, ast.NotEq)
+    function_ops = (ast.FloorDiv, ast.Pow, ast.Eq, ast.NotEq, ast.In, ast.NotIn,)
     re_py_ext = re.compile("(\.py)?$")
+
+    local_module_name = ast.Name("$module", ast.Load())
 
     def __init__(self, input_path = None, output_path = None, input_text = None, main_compiler = None, module_name = None, print_module_result = False):
         self.indent_level = 0
@@ -69,7 +74,7 @@ class Compiler:
             else:
                 self.module_name = module_name
 
-        self.local_module_name = self.gensym(self.module_name, ast.Load())
+        # self.local_module_name = self.gensym(self.module_name, ast.Load())
 
         if self.is_main_compiler:
             self.main_compiler = self
@@ -95,9 +100,19 @@ class Compiler:
             self.current_indent = "".join([self.default_indent for x in range(self.indent_level)])
         return self.current_indent
 
+    re_not_word = re.compile(r"[^\w]")
+    gensym_map = {}
     def gensym(self, name = "sym", ctx = ast.Load()):
-        name = re.sub("[^\w]", "_", name)
-        id = '__%s_%i__' % (name, random.randint(0, 100000))
+        name = self.re_not_word.sub("_", name)
+
+        i = None
+        try:
+            i = self.gensym_map[name]
+        except KeyError:
+            i = 0
+            self.gensym_map[name] = i
+
+        id = '$%s%i' % (name, i)
         return ast.Name(id, ctx)
 
     def op_is_function(self, op):
@@ -110,8 +125,6 @@ class Compiler:
         to_call = ast.Name("__import__", ast.Load())
         name = ast.Str(self.module_name)
         args = [name]
-        # if self.is_main_compiler:
-        #     args.append(ast.Str("builtins"))
         call = ast.Call(to_call, args, None, None, None)
         return self.compile_node(call)
 
@@ -203,12 +216,14 @@ class Compiler:
         else:
             self.main_compiler.modules.append(result)
 
-    def compile_Import(self, node = None, input_text = None, input_name = None):
+    def compile_Import(self, node = None, input_text = None, input_name = None, local = False):
         def do_import(name, input_path = None, input_text = None):
             compiler = Compiler(input_path = input_path, input_text = input_text, main_compiler = self.main_compiler, module_name = input_name)
             compiler.compile()
             import_call = compiler.import_me()
-            asname = ast.Name(name, ast.Store())
+
+            ctx = StoreLocal() if local else ast.Store()
+            asname = ast.Name(name, ctx)
             assign = ast.Assign([asname], JSCode(import_call))
             return assign
 
@@ -232,9 +247,10 @@ class Compiler:
     def compile_ImportFrom(self, node):
         module = node.module
         names = node.names
-        module_name = self.gensym(module, ast.Load())
-        module_alias = ast.alias(module, module_name.id)
+        module_name = ast.Name(module, ast.Load())
+        module_alias = ast.alias(module, None)
         imprt = ast.Import([module_alias])
+        imprt = JSCode(self.compile_Import(imprt, local = True))
 
         results = [imprt]
         for alias in names:
@@ -252,7 +268,7 @@ class Compiler:
         return node.code
 
     jseval_name = "jseval"
-    def compile_Call(self, node, no_kwargs = False):
+    def compile_Call(self, node, use_kwargs = True):
         func = node.func
         args = node.args
         starargs = node.starargs
@@ -280,16 +296,27 @@ class Compiler:
                 kwargs = ast.Dict([], [])
 
             if starargs:
-                args = utils.list_to_ast(args)
-                concat = ast.Attribute(args, "concat", ast.Load())
-                concatargs = [starargs, kwargs] if not no_kwargs else [starargs]
-                args = ast.Call(concat, concatargs, None, None, None)
-                args = JSCode(self.compile_Call(args, no_kwargs = True))
+                allargs = []
+                if args:
+                    allargs.append(utils.list_to_ast(args))
+                allargs.append(starargs)
+                if use_kwargs:
+                    allargs.append(kwargs)
+
+                if len(allargs) is 1:
+                    args = allargs[0]
+                else:
+                    base = allargs[0]
+                    rest = allargs[1:]
+                    concat = ast.Attribute(base, "concat", ast.Load())
+                    concat_call = ast.Call(concat, rest, None, None, None)
+                    args = JSCode(self.compile_Call(concat_call, use_kwargs = False))
+
                 _apply = ast.Attribute(func, "apply", ast.Load())
                 call = ast.Call(_apply, [ast.Name("None", ast.Load()), args], None, None, None)
-                return self.compile_Call(call, no_kwargs = True)
+                return self.compile_Call(call, use_kwargs = False)
             else:
-                if not no_kwargs:
+                if use_kwargs:
                     args = args + [kwargs]
                 return "%s(%s)" % (self.compile_node(func), self.compile_node_list(args, ", ", ""))
 
@@ -306,7 +333,7 @@ class Compiler:
             left = self.compile_node(node.left)
             op = self.compile_node(node.op)
             right = self.compile_node(node.right)
-            return "%s %s %s" % (left, op, right)
+            return "(%s %s %s)" % (left, op, right)
 
     def compile_UnaryOp(self, node):
         op = node.op
@@ -325,7 +352,7 @@ class Compiler:
             return self.compile_node(ast.Call(op, values), None, None, None)
         else:
             op = self.compile_node(node.op)
-            return (" %s " % op).join([self.compile_node(x) for x in node.values])
+            return "(" + (" %s " % op).join([self.compile_node(x) for x in node.values]) + ")"
 
     def compile_Compare(self, node):
         left = node.left
@@ -393,9 +420,10 @@ class Compiler:
         value = self.compile_node(node.value)
         attr = node.attr
 
-        if isinstance(ctx, ast.Store):
-            pass
-        elif isinstance(ctx, ast.Load):
+        if attr == "super":
+            attr = "$super"
+
+        if isinstance(ctx, ast.Store) or isinstance(ctx, ast.Load) or isinstance(ctx, ast.Del):
             pass
         else:
             raise CompileError("Can't compile attribute with context of type %s" % ctx.__class__.__name__)
@@ -417,15 +445,17 @@ class Compiler:
         if not native_index:
             fn = ast.Name("__getindex__", ast.Load())
             call = ast.Call(fn, [value, node.value], None, None, None)
-            return self.compile_node(call)
+            node_value = self.compile_node(call)
         else:
-            return "%s[%s]" % (self.compile_node(value), self.compile_node(node.value))
+            node_value = self.compile_node(node.value)
+
+        return "%s[%s]" % (self.compile_node(value), node_value)
 
     def compile_Slice(self, node, value):
-        _None = ast.Name("None", ast.Load())
-        lower = node.lower or _None
-        upper = node.upper or _None
-        step = node.step or _None
+        undefined = JSCode("void 0")
+        lower = node.lower or undefined
+        upper = node.upper or undefined
+        step = node.step or undefined
         fn = ast.Name("__slice__", ast.Load())
         call = ast.Call(fn, [value, lower, upper, step], None, None, None)
         return self.compile_node(call)
@@ -497,6 +527,14 @@ class Compiler:
         name = ast.Name("__eq__", ast.Load())
         return "!%s" % self.compile_node(name)
 
+    def compile_In(self, node):
+        name = ast.Name("__in__", ast.Load())
+        return self.compile_node(name)
+
+    def compile_NotIn(self, node):
+        _in = self.compile_In(ast.In())
+        return "!%s" % _in
+
     def compile_Gt(self, node):
         return ">"
 
@@ -515,6 +553,18 @@ class Compiler:
     def compile_IsNot(self, node):
         return "!=="
 
+    def compile_Delete(self, node):
+        results = []
+        for target in node.targets:
+            if isinstance(target, ast.Attribute):
+                results.append(JSCode("delete %s" % self.compile_node(target)))
+            elif isinstance(target, ast.Name):
+                result = ast.Assign([target], JSCode("void 0"))
+                results.append(JSCode(self.compile_node(result)))
+            else:
+                raise Exception("Can't delete instance of type %s" % target.__class__.__name__)
+        return self.compile_statement_list(results)
+
     def compile_Pass(selfe, node):
         return None
 
@@ -524,69 +574,21 @@ class Compiler:
         return n
 
     re_dblquote = re.compile(r'"')
+    re_newline = re.compile(r'\n')
     def compile_Str(self, node):
-        escaped = re.sub(self.re_dblquote, r'\"', node.s)
+        escaped = self.re_dblquote.sub(r'\"', node.s)
+        escaped = self.re_newline.sub(r'\\n', escaped)
         return '"%s"' % escaped
-
-    javascript_reserved_words = (
-        "break",
-        "case",
-        "catch",
-        "continue",
-        "debugger",
-        "default",
-        "delete",
-        "do",
-        "else",
-        "finally",
-        "for",
-        "function",
-        "if",
-        "in",
-        "instanceof",
-        "new",
-        "return",
-        "switch",
-        "this",
-        "throw",
-        "try",
-        "typeof",
-        "var",
-        "void",
-        "while",
-        "with",
-        "class",
-        "enum",
-        "export",
-        "extends",
-        "import",
-        "super",
-        "implements",
-        "interface",
-        "let",
-        "package",
-        "private",
-        "protected",
-        "public",
-        "static",
-        "yield",
-    )
-
-    python_keywords = {
-        'True': 'true',
-        'False': 'false',
-        'None': 'null',
-    }
 
     def compile_Name(self, node):
         id = node.id
         ctx = node.ctx
 
-        if id in self.python_keywords:
-            return self.python_keywords[id]
+        if id in utils.python_keywords:
+            return utils.python_keywords[id]
 
         is_super = id == "super"
-        if id in self.javascript_reserved_words:
+        if id in utils.javascript_reserved_words:
             id = "$%s" % id
             node = ast.Name(id, ctx)
 
@@ -595,19 +597,25 @@ class Compiler:
         except IndexError:
             active_ctx = None
 
-        if active_ctx and isinstance(ctx, ast.Store):
-            active_ctx.set(node)
+        if active_ctx:
+            should_export = active_ctx.is_module_context or active_ctx.is_class_context
+            ctx_is_store = isinstance(ctx, ast.Store)
+            if should_export and ctx_is_store and not isinstance(ctx, StoreLocal):
+                active_ctx.set_export(node)
+            elif ctx_is_store:
+                active_ctx.set_local(node)
 
-        is_local_module_name = node is self.local_module_name
+        is_local_module_name = node.id is self.local_module_name.id
         if is_super:
             return "__self__.%s" % id
-        elif not is_local_module_name and not self.is_builtins and active_ctx and active_ctx.is_module_context() and active_ctx.get(node):
+        elif not is_local_module_name and not self.is_builtins and active_ctx and active_ctx.is_module_context and active_ctx.is_export(node):
             local_module_name = self.compile_node(self.local_module_name)
             return "%s.%s" % (local_module_name, id)
-        elif active_ctx and active_ctx.is_class_context() and active_ctx.get(node) and id is not active_ctx.class_name:
+        elif active_ctx and active_ctx.is_class_context and active_ctx.is_export(node) and id is not active_ctx.class_name:
             return "%s.%s.%s" % (active_ctx.class_name, "prototype", id)
         else:
-            self.main_compiler.builtins.use(id)
+            if not active_ctx or not active_ctx.is_local(node):
+                self.main_compiler.builtins.use(id)
             return id
 
     def compile_If(self, node):
@@ -701,7 +709,8 @@ class Compiler:
         result_assign = ast.Assign([result_name], ast.List([], ast.Store()))
         result_name = ast.Name(result_name.id, ast.Load())
 
-        append_result = ast.Call(ast.Attribute(result_name, "push", ast.Load()), [elt], None, None, None)
+        pusher = ast.Attribute(result_name, "push", ast.Load())
+        append_result = JSCode("%s(%s)" % (self.compile_node(pusher), self.compile_node(elt)))
         body = append_result
         for generator in reversed(generators):
             ifs = generator.ifs
@@ -854,9 +863,10 @@ class Compiler:
         # Compile the function name outside of the function context.
         is_class_fn = False
         if node.name:
-            name = ast.Name(node.name, ast.Store())
+            name_ctx = StoreLocal() if true_named_function else ast.Store()
+            name = ast.Name(node.name, name_ctx)
             ctx = self.context_stack.find(name)
-            is_class_fn = ctx.is_class_context()
+            is_class_fn = ctx.is_class_context
             c_name = self.compile_node(name)
             name = JSCode(c_name)
         else:
@@ -876,11 +886,10 @@ class Compiler:
 
         body = node.body
         annotations = {}
-        if node.args:
+        if node.args and not ctx.is_class_context:
             jsarguments = JSCode("arguments")
-            node_args = node.args
-            # vararg = node_args.vararg
             args = node.args.args
+
             argnames = []
             argbody = []
 
@@ -892,58 +901,96 @@ class Compiler:
                 if kwargannotation:
                     annotations[kwarg] = kwargannotation
             else:
-                kwargdict = self.gensym("kwargdict", ast.Load())
+                kwargdict = ast.Name("$kwargdict", ast.Load())
 
-            # The last argument will always be the kwargs. Make this assignment in the body of the function.
-            kwargsubscript = ast.Subscript(jsarguments, ast.Index(JSCode("arguments.length-1")), ast.Load())
-            kwargsubscript = JSCode(self.compile_Subscript(kwargsubscript, native_index = True))
-            kwargassign = ast.Assign([ast.Name(kwargdict.id, ast.Store())], kwargsubscript)
-            argbody.append(kwargassign)
+            if not ctx.is_module_context:
+                # The last argument will always be the kwargs. Make this assignment in the body of the function.
+                kwargsubscript = ast.Subscript(jsarguments, ast.Index(JSCode("arguments.length-1")), ast.Load())
+                kwargsubscript = JSCode(self.compile_Subscript(kwargsubscript, native_index = True))
+                kwargassign = ast.Assign([ast.Name(kwargdict.id, ast.Store())], kwargsubscript)
+                argbody.append(kwargassign)
 
-            for arg in args:
+            def set_arg(arg, value, default = True):
+                name = ast.Name(arg, ast.Store())
+                kwargpart = " || %s === $kwargdict" % self.compile_node(name)
+                assign = ast.Assign([name], value)
+                if default:
+                    condition = JSCode("%s === void 0%s" % (self.compile_node(name), kwargpart if not ctx.is_module_context else ""))
+                    _if = ast.If(condition, [assign], None)
+                    result = _if
+                else:
+                    result = assign
+                return result
+
+            defaults = node.args.defaults or []
+            if len(defaults) < len(args):
+                diff = len(args) - len(defaults)
+                defaults = ([None] * diff) + defaults
+
+            for idx, arg in enumerate(args):
                 a = arg.arg
                 ctx.set_argument(a)
                 argnames.append(a)
 
-                subscript = ast.Subscript(kwargdict, ast.Index(ast.Str(a)), ast.Load())
-                subscript = JSCode(self.compile_Subscript(subscript, native_index = True))
-                assign = ast.Assign([ast.Name(a, ast.Store())], subscript)
-                _if = ast.If(JSCode("%s === void 0" % a), [assign], None)
-                argbody.append(_if)
+                if not ctx.is_module_context:
+                    subscript = ast.Subscript(kwargdict, ast.Index(ast.Str(a)), ast.Load())
+                    subscript = JSCode(self.compile_Subscript(subscript, native_index = True))
+                    _if = set_arg(a, subscript)
+                    if_body = _if.body
+
+                    default = defaults[idx]
+                    if default:
+                        if_default = set_arg(a, default)
+                        if_body.append(if_default)
+
+                    argbody.append(_if)
 
                 annotation = arg.annotation
                 if annotation:
                     annotations[a] = annotation
 
-            vararg = node.args.vararg
-            if vararg:
-                start = ast.Num(len(argnames))
-                end = ast.Num(-1)
-                _slice = ast.Slice(start, end, None)
-                gather = ast.Subscript(jsarguments, _slice, ast.Load())
-                assign = ast.Assign([ast.Name(vararg, ast.Store())], gather)
-                argbody.append(assign)
-
-                varargannotation = node.args.varargannotation
-                if varargannotation:
-                    annotations[vararg] = varargannotation
-
-            kwonlyargs = node.args.kwonlyargs
-            if kwonlyargs:
-                for arg in kwonlyargs:
-                    a = arg.arg
-                    subscript = ast.Subscript(kwargdict, ast.Index(ast.Str(a)), ast.Load())
-                    subscript = JSCode(self.compile_Subscript(subscript, native_index = True))
-                    assign = ast.Assign([ast.Name(a, ast.Store())], subscript)
+            if not ctx.is_module_context:
+                vararg = node.args.vararg
+                if vararg:
+                    start = ast.Num(len(argnames))
+                    end = ast.Num(-1)
+                    _slice = ast.Slice(start, end, None)
+                    gather = ast.Subscript(jsarguments, _slice, ast.Load())
+                    assign = ast.Assign([ast.Name(vararg, ast.Store())], gather)
                     argbody.append(assign)
 
-                    annotation = arg.annotation
-                    if annotation:
-                        annotations[a] = annotation
+                    varargannotation = node.args.varargannotation
+                    if varargannotation:
+                        annotations[vararg] = varargannotation
 
-            returns = node.returns
-            if returns:
-                annotations["return"] = returns
+                kwonlyargs = node.args.kwonlyargs
+                if kwonlyargs:
+                    kw_defaults = node.args.kw_defaults or []
+                    for idx, arg in enumerate(kwonlyargs):
+                        a = arg.arg
+
+                        subscript = ast.Subscript(kwargdict, ast.Index(ast.Str(a)), ast.Load())
+                        subscript = JSCode(self.compile_Subscript(subscript, native_index = True))
+                        assign = set_arg(a, subscript, False)
+                        argbody.append(assign)
+
+                        try:
+                            default = kw_defaults[idx]
+                            if default:
+                                argbody.append(set_arg(a, default))
+                        except IndexError:
+                            pass
+
+                        annotation = arg.annotation
+                        if annotation:
+                            annotations[a] = annotation
+
+            try:
+                returns = node.returns
+                if returns:
+                    annotations["return"] = returns
+            except AttributeError:
+                pass
 
             args = ', '.join(argnames)
             body = argbody + body
@@ -1011,7 +1058,12 @@ class Compiler:
         ret = ast.Return(instantiate_call)
         cls = ast.FunctionDef(name, [], [ret], None, None)
         self.indent(1)
+
+        # Make sure the class function name is compiled in its own context.
+        self.context_stack.new()
         cls = JSCode(self.compile_FunctionDef(cls, true_named_function = True))
+        self.context_stack.pop()
+
         self.indent(-1)
 
         if not node.bases:

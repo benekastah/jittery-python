@@ -4,11 +4,22 @@ class Context:
     def __init__(self, stack, class_name = None):
         self.stack = stack
         self.class_name = class_name
+
         self.globals = []
         self.arguments = []
         self.locals = []
 
-    def get_key_id(self, key):
+        self.is_module_context = False
+        self.is_class_context = False
+        self.exports = []
+
+        if not self.stack:
+            self.is_module_context = True
+
+        if class_name:
+            self.is_class_context = True
+
+    def _get_key_id(self, key):
         if isinstance(key, str):
             return key
         elif isinstance(key, ast.Name):
@@ -16,56 +27,64 @@ class Context:
         else:
             raise Exception("Invalid key: %s" % str(key))
 
-    def get(self, key):
-        id = self.get_key_id(key)
-        return id in self.locals or id in self.arguments
+    def _key_is_in(self, key, ls):
+        id = self._get_key_id(key)
+        return id in ls
 
-    def set(self, key, include = True, ls = None):
+    def is_local(self, key):
+        return self._key_is_in(key, self.locals) or self.is_argument(key)
+
+    def is_argument(self, key):
+        return self._key_is_in(key, self.arguments)
+
+    def is_global(self, key):
+        return self._key_is_in(key, self.globals)
+
+    def is_export(self, key):
+        return self._key_is_in(key, self.exports)
+
+    def _set(self, key, include = True, ls = None):
         if ls is None:
             ls = self.locals
 
         if ls is self.locals:
-            other_ls = self.arguments
+            other_ls = self.exports if self.is_module_context or self.is_class_context else self.arguments
         else:
             other_ls = self.locals
 
-        id = self.get_key_id(key)
+        id = self._get_key_id(key)
         already_in_ls = id in ls
         already_in_other = id in other_ls
 
-        if include and (self.is_module_context() or id not in self.globals) and not already_in_other and not already_in_ls:
+        if include and (self.is_module_context or id not in self.globals) and not already_in_other and not already_in_ls:
             ls.append(id)
         elif not include and already_in_ls:
             index = ls.index(id)
             del ls[index]
 
-    def get_vars(self, should_get_vars = None):
+    def get_vars(self, should_get_vars = True):
         from jittery_python.compiler import JSCode
-        if should_get_vars or (should_get_vars != False and not self.is_module_context() and not self.is_class_context()):
+        if should_get_vars:
             if self.locals:
                 return JSCode("var %s" % ', '.join(self.locals))
         return JSCode("")
 
+    def set_local(self, key):
+        self._set(key, ls = self.locals)
+
     def set_global(self, key):
-        id = self.get_key_id(key)
+        id = self._get_key_id(key)
         if id in self.locals:
-            self.set(id, False)
+            self._set(id, False)
             print("SyntaxWarning: name '%s' is assigned to before global declaration" % id)
 
         self.globals.append(id)
 
-    def is_global(self, key):
-        id = self.get_key_id(key)
-        return id in self.globals
-
     def set_argument(self, arg):
-        self.set(arg, ls = self.arguments)
+        self._set(arg, ls = self.arguments)
 
-    def is_module_context(self):
-        return self is self.stack[0]
-
-    def is_class_context(self):
-        return not not self.class_name
+    def set_export(self, exp):
+        self._set(exp, ls = self.exports)
 
 
 class ContextStack(list):
@@ -82,7 +101,7 @@ class ContextStack(list):
         else:
             context = None
             for c in reversed(self):
-                if c.get(id):
+                if c.is_local(id) or c.is_export(id):
                     context = c
                     break
             if not context:
