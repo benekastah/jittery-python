@@ -8,6 +8,7 @@ class Context:
         self.globals = []
         self.arguments = []
         self.locals = []
+        self.types = {}
 
         self.is_module_context = False
         self.is_class_context = False
@@ -19,7 +20,8 @@ class Context:
         if class_name:
             self.is_class_context = True
 
-    def _get_key_id(self, key):
+    @staticmethod
+    def _get_key_id(key):
         if isinstance(key, str):
             return key
         elif isinstance(key, ast.Name):
@@ -86,6 +88,15 @@ class Context:
     def set_export(self, exp):
         self._set(exp, ls = self.exports)
 
+    def type(self, item, _type = None):
+        if _type:
+            self.types[item] = _type
+        else:
+            try:
+                return self.types[item]
+            except KeyError:
+                pass
+
 
 class ContextStack(list):
     def new(self, class_name = None):
@@ -93,8 +104,24 @@ class ContextStack(list):
         self.append(ctx)
         return ctx
 
+    @staticmethod
+    def _get_key_id(item):
+        if isinstance(item, ast.Attribute):
+            return ContextStack._get_key_id(item.value)
+        else:
+            try:
+                return Context._get_key_id(item)
+            except:
+                pass
+
     def find(self, name):
-        id = name.id
+        if not self:
+            return None
+
+        id = self._get_key_id(name)
+        if not id:
+            return None
+
         ctx = name.ctx
         if isinstance(ctx, ast.Store):
             context = self[-1]
@@ -106,7 +133,12 @@ class ContextStack(list):
                     break
             if not context:
                 context = self[0]
-        if context.is_global(name):
+        if context.is_global(id):
             return self[0]
         else:
             return context
+
+    def find_type(self, item):
+        context = self.find(item)
+        if context:
+            return context.type(item)

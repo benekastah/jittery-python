@@ -9,6 +9,7 @@ def jseval(*a): pass
 class Builtins:
     re_dedent1 = re.compile(r"^(    |\t)", re.MULTILINE)
     re_star = re.compile(r"\*")
+    always_available = ["__import__", "__slice__", "__getindex__", "__eq__", "__in__",]
 
     def __init__(self):
         self.usedict = {}
@@ -29,10 +30,8 @@ class Builtins:
             self.usedict[name] = True
 
             # Stuff we want to have unconditionally (for now).
-            self.use("__slice__")
-            self.use("__getindex__")
-            self.use("__eq__")
-            self.use("__in__")
+            for item in self.always_available:
+                self.use(item)
 
             try:
                 item = self.__getattribute__(name)
@@ -78,6 +77,14 @@ class Builtins:
                "fn(prop, o[prop], {}); "
                "} "
                "}")
+
+    def _keys(o):
+        if Object.keys:
+            return jseval("Object.keys(o)")
+        else:
+            keys = jseval("[]")
+            _each(o, lambda k, v: jseval("keys.push(k)"))
+            return keys
 
     def _typeof(o, t):
         type = jseval("Object.prototype.toString.call(o)")
@@ -170,6 +177,8 @@ class Builtins:
     def len(ls):
         return ls.length
 
+    def bool(x): return not not x
+
     def print(*objects, sep=' ', end='\n', file=None, flush=False):
         string = [str(o) for o in objects].join(sep) + end
         jseval("console.log(string)")
@@ -199,10 +208,9 @@ class Builtins:
 
         def each_method(prop, fn):
             if isinstance(fn, Function) and prop not in special_fns:
-                _fn = jseval("fn.bind(null, context)")
                 if in_super:
                     if prop is "$super": return None
-                    def tmp():
+                    def tmp(*args):
                         old_sup = context.super
                         __super__ = context.__super__
                         sup = cls.prototype.super
@@ -217,7 +225,7 @@ class Builtins:
 
                     self[prop] = tmp
                 else:
-                    self[prop] = _fn
+                    self[prop] = jseval("fn.bind(null, context)")
 
         _each(cls.prototype, each_method)
 
@@ -235,13 +243,43 @@ class Builtins:
 
     class object:
         def __init__(self):
-            self.super_stack = []
+            # self.super_stack = []
+            pass
 
-    def bool(x): return not not x
+    class slice:
+        def __init__(self, start, stop, step):
+            self.start = start
+            self.stop = stop
+            self.step = step
 
-    class ModifyError(Exception): pass
+    class _static_array:
+        def __init__(self, iterable):
+            if _typeof(iterable) is "array":
+                array = iterable
+            elif isinstance(iterable, list):
+                array = jseval("[]")
+                for x in iterable:
+                    jseval("array.push(x)")
+            elif isinstance(iterable, dict):
+                self.__init__(iterable.keys())
+                return
+            elif _typeof(iterable) is "object" and not isinstance(iterable, object):
+                array = _keys(iterable)
+            self.__storage = array
 
-    class tuple(Array):
+        def __getindex__(self, idx):
+            return jseval("self.__storage[idx]")
+
+    class list(_static_array):
+        def __init__(self, iterable = jseval("[]")):
+            if isinstance(iterable, object) or _typeof(iterable) is "array":
+                super().__init__(iterable)
+            elif _typeof(iterable) is "object":
+                super().__init__(_keys(iterable))
+            else:
+                raise TypeError("%s is not iterable" % (iterable and iterable.__class__.__name__))
+
+    class tuple(_static_array):
         def __init__(self, iterable):
             sup = super()
             for item in iterable:

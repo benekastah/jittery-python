@@ -12,8 +12,18 @@ class JSCode:
     def __str__(self):
         return self.code
 
+
 # This class is used to force a local variable in a class or module definition, where exporting the variable is the default.
 class StoreLocal(ast.Store): pass
+
+class Array:
+    def __init__(self, ls):
+        self.list = ls
+
+class ClassCall(ast.Call):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
 
 def compile(text = None, file = None, bare = None):
     compiler = Compiler(input_text = text, input_path = file)
@@ -79,6 +89,25 @@ class Compiler:
         if self.is_main_compiler:
             self.main_compiler = self
 
+    _native_types = ("__native__", "Array", "Object", "RegExp", "Date", "Function", "Arguments", "Number", "String", "window", "global",)
+    def _is_native_type(self, _type):
+        if isinstance(_type, ast.Name):
+            id = _type.id
+            return id in self._native_types
+        else:
+            return False
+
+    def _is_statement_of(self, node):
+        for item in reversed(self._nodes):
+            try:
+                body = item.body
+            except AttributeError:
+                body = None
+            if isinstance(body, list):
+                for body_item in body:
+                    if node is body_item or (isinstance(body_item, ast.Expr) and node is body_item.value):
+                        return item
+
     def get_file_path(self, path, default_file_name):
         f = None
         d = None
@@ -142,7 +171,8 @@ class Compiler:
         if self.verbose:
             print_node(file_ast)
 
-        self.compile_Module(file_ast)
+        self._nodes = []
+        self.compile_node(file_ast)
         if self.is_main_compiler:
             if not self.bare:
                 if self.builtins.module_text:
@@ -165,15 +195,20 @@ class Compiler:
             else:
                 return compiled
 
-    def compile_node(self, node, *args):
+    def compile_node(self, node, *args, **kwargs):
         if isinstance(node, list):
+            append = False
             f = self.compile_node_list
         else:
+            if isinstance(node, ast.AST):
+                self._nodes.append(node)
+
             class_name = node.__class__.__name__
             f = getattr(self, "compile_%s" % class_name)
             if not f:
                 raise CompileError("No compiler for AST node %s" % class_name)
-        return f(node, *args)
+
+            return f(node, *args, **kwargs)
 
     def compile_node_list(self, nodes, joiner = ";\n", trailing = ";"):
         compiled = [self.compile_node(n) for n in nodes]
@@ -250,7 +285,7 @@ class Compiler:
         module_name = ast.Name(module, ast.Load())
         module_alias = ast.alias(module, None)
         imprt = ast.Import([module_alias])
-        imprt = JSCode(self.compile_Import(imprt, local = True))
+        imprt = JSCode(self.compile_node(imprt, local = True))
 
         results = [imprt]
         for alias in names:
@@ -262,7 +297,11 @@ class Compiler:
         return self.compile_node_list(results, ", ", "")
 
     def compile_Expr(self, node):
-        return self.compile_node(node.value)
+        result = self.compile_node(node.value)
+        if result:
+            return "(%s)" % result
+        else:
+            return result
 
     def compile_JSCode(self, node):
         return node.code
@@ -274,6 +313,16 @@ class Compiler:
         starargs = node.starargs
         keywords = node.keywords
         kwargs = node.kwargs
+
+        if isinstance(func, ast.Name):
+            _type = self.context_stack.find_type(func)
+        elif isinstance(func, ast.Attribute):
+            _type = self.context_stack.find_type(func.value)
+        else:
+            _type = None
+
+        if _type and self._type_is_native(_type):
+            use_kwargs = False
 
         # jseval
         if isinstance(func, ast.Name) and func.id == self.jseval_name:
@@ -310,11 +359,11 @@ class Compiler:
                     rest = allargs[1:]
                     concat = ast.Attribute(base, "concat", ast.Load())
                     concat_call = ast.Call(concat, rest, None, None, None)
-                    args = JSCode(self.compile_Call(concat_call, use_kwargs = False))
+                    args = JSCode(self.compile_node(concat_call, use_kwargs = False))
 
                 _apply = ast.Attribute(func, "apply", ast.Load())
                 call = ast.Call(_apply, [ast.Name("None", ast.Load()), args], None, None, None)
-                return self.compile_Call(call, use_kwargs = False)
+                return self.compile_node(call, use_kwargs = False)
             else:
                 if use_kwargs:
                     args = args + [kwargs]
@@ -413,7 +462,7 @@ class Compiler:
         else:
             assigner = "%s=" % self.compile_node(op)
         assign = ast.Assign([target], value)
-        return self.compile_Assign(assign, assigner)
+        return self.compile_node(assign, assigner)
 
     def compile_Attribute(self, node, assign = None):
         ctx = node.ctx
@@ -433,13 +482,19 @@ class Compiler:
     def compile_Subscript(self, node, native_index = False):
         value = node.value
         slice = node.slice
+
+        _type = self.context_stack.find_type(node)
+        is_native = self._is_native_type(_type)
+
         if isinstance(slice, ast.Index):
-            return self.compile_Index(slice, value = value, native_index = native_index)
+            kwargs = {'value': value, 'native_index': is_native or native_index}
         elif isinstance(slice, ast.Slice):
-            return self.compile_Slice(slice, value = value)
+            if is_native:
+                raise CompilerError("Can't slice a native javascript object")
+            kwargs = {'value': value}
         else:
             raise CompilerError("Can't compile subscript unless the slice node is either ast.Index or ast.Slice")
-
+        return self.compile_node(slice, **kwargs)
 
     def compile_Index(self, node, value, native_index = False):
         if not native_index:
@@ -532,7 +587,7 @@ class Compiler:
         return self.compile_node(name)
 
     def compile_NotIn(self, node):
-        _in = self.compile_In(ast.In())
+        _in = self.compile_node(ast.In())
         return "!%s" % _in
 
     def compile_Gt(self, node):
@@ -616,6 +671,8 @@ class Compiler:
         else:
             if not active_ctx or not active_ctx.is_local(node):
                 self.main_compiler.builtins.use(id)
+            if False and id == 'a':
+                raise Exception("%s: oh noes!!" % id)
             return id
 
     def compile_If(self, node):
@@ -813,16 +870,41 @@ class Compiler:
         for name in node.names:
             ctx.set_global(name)
 
+    def _dict_is_type_annotation(self, ls, is_keys = False):
+        for x in ls:
+            works = isinstance(x, ast.Name) or isinstance(x, ast.Attribute)
+            if works and is_keys:
+                works = bool(self.context_stack.find(x))
+            if not works:
+                return False
+        return True
+
     def compile_Dict(self, node):
         keys = node.keys
         values = node.values
+        assert len(node.keys) == len(node.values)
 
-        idx = 0
-        length = len(keys)
+        # print("compile_Dict", end="\t")
+        # print_node(node)
+        # print(keys, values)
+
+        container = self._is_statement_of(node)
+        # print("compile_Dict", container)
+        # Ensure this is a standalone statement or the last statement in a container (so it doesn't mess lambdas up).
+        if container and node is not container.body[-1]:
+            keys_work = self._dict_is_type_annotation(keys, is_keys = True)
+            values_work = self._dict_is_type_annotation(values)
+            if keys_work and values_work:
+                # We will now proceed assuming the dict is a type annotation.
+                context = self.context_stack[-1]
+                for key, value in zip(keys, values):
+                    context.type(key, value)
+                print("compile_Dict", "Type annotation", end=" ")
+                print_node(node)
+                return None
+
         kvs = []
-        while idx < length:
-            key = keys[idx]
-            value = values[idx]
+        for key, value in zip(keys, values):
             kvs.append("%s: %s" % (self.compile_node(key), self.compile_node(value)))
 
         if kvs:
@@ -839,17 +921,18 @@ class Compiler:
 
         return result
 
-    def compile_Array(self, node_list):
-        elts = self.compile_node_list(node_list, ", ", "")
+    def compile_Array(self, node):
+        ls = node.list
+        elts = self.compile_node_list(ls, ", ", "")
         return "[%s]" % elts
 
     def compile_List(self, node):
-        return self.compile_Array(node.elts)
+        return self.compile_node(Array(node.elts))
 
     def compile_Tuple(self, node):
         tuplecls = ast.Name('tuple', ast.Load())
-        call = ast.Call(tuplecls, [JSCode(self.compile_Array(node.elts))], None, None, None)
-        return self.compile_ClassCall(call)
+        call = ClassCall(tuplecls, [JSCode(self.compile_node(Array(node.elts)))], None, None, None)
+        return self.compile_node(call)
 
     def compile_Lambda(self, node):
         ret = ast.Return(node.body)
@@ -906,7 +989,7 @@ class Compiler:
             if not ctx.is_module_context:
                 # The last argument will always be the kwargs. Make this assignment in the body of the function.
                 kwargsubscript = ast.Subscript(jsarguments, ast.Index(JSCode("arguments.length-1")), ast.Load())
-                kwargsubscript = JSCode(self.compile_Subscript(kwargsubscript, native_index = True))
+                kwargsubscript = JSCode(self.compile_node(kwargsubscript, native_index = True))
                 kwargassign = ast.Assign([ast.Name(kwargdict.id, ast.Store())], kwargsubscript)
                 argbody.append(kwargassign)
 
@@ -934,7 +1017,7 @@ class Compiler:
 
                 if not ctx.is_module_context:
                     subscript = ast.Subscript(kwargdict, ast.Index(ast.Str(a)), ast.Load())
-                    subscript = JSCode(self.compile_Subscript(subscript, native_index = True))
+                    subscript = JSCode(self.compile_node(subscript, native_index = True))
                     _if = set_arg(a, subscript)
                     if_body = _if.body
 
@@ -970,7 +1053,7 @@ class Compiler:
                         a = arg.arg
 
                         subscript = ast.Subscript(kwargdict, ast.Index(ast.Str(a)), ast.Load())
-                        subscript = JSCode(self.compile_Subscript(subscript, native_index = True))
+                        subscript = JSCode(self.compile_node(subscript, native_index = True))
                         assign = set_arg(a, subscript, False)
                         argbody.append(assign)
 
@@ -1061,7 +1144,7 @@ class Compiler:
 
         # Make sure the class function name is compiled in its own context.
         self.context_stack.new()
-        cls = JSCode(self.compile_FunctionDef(cls, true_named_function = True))
+        cls = JSCode(self.compile_node(cls, true_named_function = True))
         self.context_stack.pop()
 
         self.indent(-1)
@@ -1077,7 +1160,7 @@ class Compiler:
 
         ret = ast.Return(JSCode(name))
         func = ast.FunctionDef(name = None, args = None, body = [base, cls] + body + [ret])
-        func = JSCode(self.compile_FunctionDef(func, class_name = name))
+        func = JSCode(self.compile_node(func, class_name = name))
         call = ast.Call(func, [], None, None, None)
         cls_name = ast.Name(name, ast.Store())
         assign = ast.Assign([cls_name], call)
