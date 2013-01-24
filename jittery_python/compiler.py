@@ -176,7 +176,7 @@ class Compiler:
         if self.is_main_compiler:
             if not self.bare:
                 if self.builtins.module_text:
-                   self.compile_Import(input_text = self.builtins.module_text, input_name = "builtins")
+                    self.compile_Import(input_text = self.builtins.module_text, input_name = "builtins")
                 import_stmt = self.import_me()
                 code = self.modules + [import_stmt]
             else:
@@ -197,7 +197,6 @@ class Compiler:
 
     def compile_node(self, node, *args, **kwargs):
         if isinstance(node, list):
-            append = False
             f = self.compile_node_list
         else:
             if isinstance(node, ast.AST):
@@ -208,7 +207,7 @@ class Compiler:
             if not f:
                 raise CompileError("No compiler for AST node %s" % class_name)
 
-            return f(node, *args, **kwargs)
+        return f(node, *args, **kwargs)
 
     def compile_node_list(self, nodes, joiner = ";\n", trailing = ";"):
         compiled = [self.compile_node(n) for n in nodes]
@@ -671,8 +670,6 @@ class Compiler:
         else:
             if not active_ctx or not active_ctx.is_local(node):
                 self.main_compiler.builtins.use(id)
-            if False and id == 'a':
-                raise Exception("%s: oh noes!!" % id)
             return id
 
     def compile_If(self, node):
@@ -899,8 +896,8 @@ class Compiler:
                 context = self.context_stack[-1]
                 for key, value in zip(keys, values):
                     context.type(key, value)
-                print("compile_Dict", "Type annotation", end=" ")
-                print_node(node)
+                # print("compile_Dict", "Type annotation", end=" ")
+                # print_node(node)
                 return None
 
         kvs = []

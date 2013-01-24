@@ -1,13 +1,7 @@
-import os
-
 try:
-    if os.environ['JITTERY_PYTHON']:
-        from jittery_python import setup
-except KeyError:
-    try:
-        from setuptools import setup
-    except ImportError:
-        from distutils.core import setup
+    from setuptools import setup
+except ImportError:
+    from distutils.core import setup
 
 config = {
     'description': 'My Project',
