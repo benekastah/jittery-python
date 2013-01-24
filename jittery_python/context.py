@@ -1,4 +1,5 @@
 import ast
+from jittery_python.utils import print_node
 
 class Context:
     def __init__(self, stack, class_name = None):
@@ -26,6 +27,8 @@ class Context:
             return key
         elif isinstance(key, ast.Name):
             return key.id
+        elif isinstance(key, ast.Str):
+            return key.s
         else:
             raise Exception("Invalid key: %s" % str(key))
 
@@ -89,11 +92,12 @@ class Context:
         self._set(exp, ls = self.exports)
 
     def type(self, item, _type = None):
+        id = self._get_key_id(item)
         if _type:
-            self.types[item] = _type
+            self.types[id] = self._get_key_id(_type)
         else:
             try:
-                return self.types[item]
+                return self.types[id]
             except KeyError:
                 pass
 
@@ -139,6 +143,8 @@ class ContextStack(list):
             return context
 
     def find_type(self, item):
+        if isinstance(item, ast.Attribute):
+            return None
         context = self.find(item)
         if context:
             return context.type(item)

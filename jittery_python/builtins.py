@@ -64,8 +64,9 @@ class Builtins:
     class Exception(Error): pass
 
     def _clone(o):
+        {"Object": "__native__"}
         if Object.create:
-            return jseval("Object.create(o)")
+            return Object.create(o)
         else:
             def f(): pass
             f.prototype = o
@@ -79,11 +80,12 @@ class Builtins:
                "}")
 
     def _keys(o):
+        {"Object": "__native__", "keys": "Array"}
         if Object.keys:
-            return jseval("Object.keys(o)")
+            return Object.keys(o)
         else:
-            keys = jseval("[]")
-            _each(o, lambda k, v: jseval("keys.push(k)"))
+            keys = []
+            _each(o, lambda k, v: keys.push(k))
             return keys
 
     def _typeof(o, t):
@@ -210,14 +212,16 @@ class Builtins:
             if isinstance(fn, Function) and prop not in special_fns:
                 if in_super:
                     if prop is "$super": return None
-                    def tmp(*args):
+                    def tmp(*args: 'Array', **kwargs):
                         old_sup = context.super
                         __super__ = context.__super__
                         sup = cls.prototype.super
                         context.super = jseval("sup.bind(null, context)")
                         context.__super__ = None
 
-                        result = jseval("_fn.apply(null, arguments)")
+                        args.unshift(context)
+                        args.push(kwargs)
+                        result = jseval("fn.apply(null, args)")
 
                         context.super = old_sup
                         context.__super__ = __super__
