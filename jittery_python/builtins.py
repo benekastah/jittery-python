@@ -72,9 +72,9 @@ class Builtins:
             f.prototype = o
             return jseval("new f()")
 
-    def _each(o, fn):
+    def _each(o, fn, own = True):
         jseval("for (var prop in o) { " \
-               "if (o.hasOwnProperty(prop)) { " \
+               "if (!own || o.hasOwnProperty(prop)) { " \
                "fn(prop, o[prop], {}); "
                "} "
                "}")
@@ -100,7 +100,9 @@ class Builtins:
 
     # Internal implementation functions
     def __eq__(a, b):
-        print("Warning: == and != are not yet properly implemented. Currently an is or is not operation is used instead.")
+        if not __eq__.warn:
+            __eq__.warn = True
+            print("Warning: == and != are not yet properly implemented. Currently an `is` or `is not` operation is used instead.")
         return a is b
 
     def __in__(ls, check):
@@ -201,14 +203,9 @@ class Builtins:
     def _in_browser():
         return jseval("typeof window") is not "undefined"
 
-    def print(*objects, sep=' ', end=None, file=None, flush=False):
+    def print(*objects, sep=' ', end='', file=None, flush=False):
         {'_console': 'Object'}
         _console = console
-        if end is None:
-            if _in_browser():
-                end = ""
-            else:
-                end = "\n"
         string = [str(o) for o in objects].join(sep) + end
         _console.log(string)
 
@@ -259,7 +256,7 @@ class Builtins:
                 else:
                     self[prop] = fn.bind(null, context)
 
-        _each(cls.prototype, each_method)
+        _each(cls.prototype, each_method, False)
 
         if _typeof(self.__init__) is "function" and args is not None:
             _args = args[:]
@@ -283,7 +280,7 @@ class Builtins:
             self.step = step
 
     class _static_array:
-        def __init__(self, iterable):
+        def __init__(self, iterable = jseval("[]")):
             {'array': 'Array'}
             if _typeof(iterable) is "array":
                 array = iterable
@@ -296,6 +293,8 @@ class Builtins:
                 return
             elif _typeof(iterable) is "object" and not isinstance(iterable, object):
                 array = _keys(iterable)
+            else:
+                raise TypeError("%s is not iterable" % (iterable and iterable.__class__.__name__))
             self.__storage = array
 
         def __getindex__(self, idx):
@@ -303,18 +302,26 @@ class Builtins:
             storage = self.__storage
             return storage[idx]
 
+        def __str__(self):
+            result = ""
+            sep = ", "
+            for x in self.__storage:
+                if result:
+                    result += sep
+                result += str(x)
+            return result
+
     class list(_static_array):
-        def __init__(self, iterable = jseval("[]")):
-            if isinstance(iterable, object) or _typeof(iterable) is "array":
-                super().__init__(iterable)
-            elif _typeof(iterable) is "object":
-                super().__init__(_keys(iterable))
-            else:
-                raise TypeError("%s is not iterable" % (iterable and iterable.__class__.__name__))
+        def append(self, x):
+            {'storage': 'Array'}
+            storage = self.__storage
+            storage.push(x)
+
+        def __str__(self):
+            return "[" + super().__str__() + "]"
 
     class tuple(_static_array):
-        def __init__(self, iterable):
-            super().__init__(iterable)
+        def __str__(self):
+            return "(" + super().__str__() + ")"
 
-        def _modify_err(self):
-            raise ModifyError()
+    class dict: pass

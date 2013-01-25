@@ -1137,7 +1137,11 @@ class Compiler:
             return result
 
     def compile_Return(self, node):
-        return "return %s" % self.compile_node(node.value)
+        result = "return"
+        if node.value:
+            return "%s %s" % (result, self.compile_node(node.value))
+        else:
+            return result
 
     def compile_ClassDef(self, node):
         name = node.name

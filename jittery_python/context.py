@@ -127,12 +127,15 @@ class ContextStack(list):
             return None
 
         ctx = name.ctx
+        last_context = self[-1]
         if isinstance(ctx, ast.Store):
-            context = self[-1]
+            context = last_context
         else:
             context = None
             for c in reversed(self):
                 if c.is_local(id) or c.is_export(id):
+                    if c.is_class_context and c is not last_context:
+                        continue
                     context = c
                     break
             if not context:
