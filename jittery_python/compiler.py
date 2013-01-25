@@ -89,7 +89,7 @@ class Compiler:
         if self.is_main_compiler:
             self.main_compiler = self
 
-    _native_types = ("__native__", "Array", "Object", "RegExp", "Date", "Function", "Arguments", "Number", "String", "window", "global",)
+    _native_types = ("Array", "Object", "RegExp", "Date", "Function", "Arguments", "Number", "String", "window", "global",)
     def _is_native_type(self, _type):
         return _type in self._native_types
 
@@ -97,8 +97,11 @@ class Compiler:
         for item in reversed(self._nodes):
             try:
                 body = item.body
+                if isinstance(item, ast.If) and item.orelse:
+                    body = body + item.orelse
             except AttributeError:
                 body = None
+
             if isinstance(body, list):
                 for body_item in body:
                     if node is body_item or (isinstance(body_item, ast.Expr) and node is body_item.value):

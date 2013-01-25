@@ -64,7 +64,7 @@ class Builtins:
     class Exception(Error): pass
 
     def _clone(o):
-        {"Object": "__native__"}
+        {"Object": "Function"}
         if Object.create:
             return Object.create(o)
         else:
@@ -80,7 +80,7 @@ class Builtins:
                "}")
 
     def _keys(o):
-        {"Object": "__native__", "keys": "Array"}
+        {"Object": "Function", "keys": "Array"}
         if Object.keys:
             return Object.keys(o)
         else:
@@ -89,9 +89,11 @@ class Builtins:
             return keys
 
     def _typeof(o, t):
-        type = jseval("Object.prototype.toString.call(o)")
-        type = type.substring(8, type.length - 1).toLowerCase()
-        return type
+        {'toString': 'Function', 't': 'String'}
+        toString = Object.prototype.toString
+        t = toString.call(o)
+        t = t.substring(8, t.length - 1)
+        return t.toLowerCase()
 
     def _null(o):
         return jseval("o == null")
@@ -101,9 +103,12 @@ class Builtins:
         print("Warning: == and != are not yet properly implemented. Currently an is or is not operation is used instead.")
         return a is b
 
-    def __in__(check, ls):
-        if jseval("ls.indexOf(check) >= 0"):
-            return True
+    def __in__(ls, check):
+        {'a': 'Array'}
+        if _typeof(ls) is Array:
+            a = ls
+            if a.indexOf(check) >= 0:
+                return True
 
         for item in ls:
             if item == check:
@@ -138,9 +143,10 @@ class Builtins:
                 endidx = len(ls)
             endidx -= 1
 
+            {'ret': 'Array'}
             ret = []
             while idx >= 0 and idx <= endidx:
-                jseval("ret.push(ls[idx])")
+                ret.push(ls[idx])
                 idx += step
             return ret
 
@@ -161,6 +167,7 @@ class Builtins:
                 self._included_modules[name] = m
             return m
 
+        # This will go away when static methods work.
         jseval("return __ModuleList__()")
 
     def __registermodule__(name, fn):
@@ -171,8 +178,18 @@ class Builtins:
 
     # Public functions
     def str(o):
-        if not _null(o) and _typeof(o.toString) is "function":
-            return jseval("o.toString()")
+        {'so': 'Object'}
+        if _null(o):
+            return "None"
+        elif o is True:
+            return "True"
+        elif o is False:
+            return "False"
+        elif _typeof(o.__str__) is "function":
+            return o.__str__()
+        elif _typeof(o.toString) is "function":
+            so = o
+            return so.toString()
         else:
             return "" + o
 
@@ -181,22 +198,31 @@ class Builtins:
 
     def bool(x): return not not x
 
-    def print(*objects, sep=' ', end='\n', file=None, flush=False):
+    def _in_browser():
+        return jseval("typeof window") is not "undefined"
+
+    def print(*objects, sep=' ', end=None, file=None, flush=False):
+        {'_console': 'Object'}
+        _console = console
+        if end is None:
+            if _in_browser():
+                end = ""
+            else:
+                end = "\n"
         string = [str(o) for o in objects].join(sep) + end
-        jseval("console.log(string)")
+        _console.log(string)
 
     # Class stuff
     def isinstance(item, cls):
-        if item and (jseval("item instanceof cls") or jseval("typeof item") == cls.name):
-            return True
-        else:
-            return False
+        return jseval("item instanceof cls")
 
     def __class_extend__(child, parent):
         if child is not parent:
+            {'sup': 'Function'}
+            sup = _super
             child.prototype = _clone(parent.prototype)
             child.prototype.constructor = child
-            child.prototype.super = jseval("_super.bind(null, parent)")
+            child.prototype.super = sup.bind(null, parent)
         else: # child and parent are both `object`
             child.prototype.super = _super
 
@@ -209,19 +235,21 @@ class Builtins:
         special_fns = ["constructor"]
 
         def each_method(prop, fn):
+            {'fn': 'Function'}
             if isinstance(fn, Function) and prop not in special_fns:
                 if in_super:
                     if prop is "$super": return None
                     def tmp(*args: 'Array', **kwargs):
+                        {'sup': 'Function'}
                         old_sup = context.super
                         __super__ = context.__super__
                         sup = cls.prototype.super
-                        context.super = jseval("sup.bind(null, context)")
+                        context.super = sup.bind(null, context)
                         context.__super__ = None
 
                         args.unshift(context)
                         args.push(kwargs)
-                        result = jseval("fn.apply(null, args)")
+                        result = fn.apply(null, args)
 
                         context.super = old_sup
                         context.__super__ = __super__
@@ -229,14 +257,13 @@ class Builtins:
 
                     self[prop] = tmp
                 else:
-                    self[prop] = jseval("fn.bind(null, context)")
+                    self[prop] = fn.bind(null, context)
 
         _each(cls.prototype, each_method)
 
         if _typeof(self.__init__) is "function" and args is not None:
-            args = jseval("Array.prototype.slice.call(args)")
-            jseval("args.unshift(self)")
-            self.__init__(*args)
+            _args = args[:]
+            self.__init__(*_args)
 
         return self
 
@@ -247,7 +274,6 @@ class Builtins:
 
     class object:
         def __init__(self):
-            # self.super_stack = []
             pass
 
     class slice:
@@ -258,12 +284,13 @@ class Builtins:
 
     class _static_array:
         def __init__(self, iterable):
+            {'array': 'Array'}
             if _typeof(iterable) is "array":
                 array = iterable
             elif isinstance(iterable, list):
-                array = jseval("[]")
+                array = []
                 for x in iterable:
-                    jseval("array.push(x)")
+                    array.push(x)
             elif isinstance(iterable, dict):
                 self.__init__(iterable.keys())
                 return
@@ -272,7 +299,9 @@ class Builtins:
             self.__storage = array
 
         def __getindex__(self, idx):
-            return jseval("self.__storage[idx]")
+            {'storage': 'Array'}
+            storage = self.__storage
+            return storage[idx]
 
     class list(_static_array):
         def __init__(self, iterable = jseval("[]")):
@@ -285,16 +314,7 @@ class Builtins:
 
     class tuple(_static_array):
         def __init__(self, iterable):
-            sup = super()
-            for item in iterable:
-                len = jseval("sup.push(item)")
-                index = len - 1
-                self.__defineSetter__(index, self._modify_err)
+            super().__init__(iterable)
 
         def _modify_err(self):
             raise ModifyError()
-
-        push = None
-        pop = None
-        shift = None
-        unshift = None
