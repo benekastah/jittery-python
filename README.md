@@ -62,3 +62,5 @@ You can also view the generated javascript by removing the `-e` option:
 ```bash
 $ jittery -ps "...code"
 ```
+
+Have fun!
