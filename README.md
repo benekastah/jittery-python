@@ -53,7 +53,7 @@ This particular command should output:
 
 ```bash
 Warning: == and != are not yet properly implemented. Currently an `is` or `is not` operation is used instead.
-I Jameson III hereby greet thee, Paul
+I, Jameson III, hereby greet thee, benekastah.
 25
 ```
 
