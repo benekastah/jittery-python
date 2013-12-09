@@ -1,6 +1,6 @@
 
 from nose.tools import *
-from jittery_python import compiler
+from jittery import compiler
 import subprocess
 
 def jseval(text, bare = True):

@@ -1,5 +1,5 @@
 import ast
-from jittery_python.utils import print_node
+from jittery.utils import print_node
 
 class Context:
     def __init__(self, stack, class_name = None):
@@ -68,7 +68,7 @@ class Context:
             del ls[index]
 
     def get_vars(self, should_get_vars = True):
-        from jittery_python.compiler import JSCode
+        from jittery.compiler import JSCode
         if should_get_vars:
             if self.locals:
                 return JSCode("var %s" % ', '.join(self.locals))

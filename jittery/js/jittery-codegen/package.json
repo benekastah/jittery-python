@@ -1,0 +1,22 @@
+{
+  "name": "jittery-codegen",
+  "version": "0.0.0",
+  "description": "Javascript code generator for jittery",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benekastah/jittery-python"
+  },
+  "author": "Paul Harper <benekastah@gmail.com>",
+  "license": "BSD-2-Clause",
+  "bugs": {
+    "url": "https://github.com/benekastah/jittery-python/issues"
+  },
+  "homepage": "https://github.com/benekastah/jittery-python",
+  "dependencies": {
+    "escodegen": "~1.0.1"
+  }
+}
