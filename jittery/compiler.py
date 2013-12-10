@@ -1,10 +1,13 @@
 
 import ast
 import json
+import tempfile
 import subprocess
+import os
 
 from jittery.transformer import JSTransformer
-from jittery.js import ast as js_ast
+import jittery
+import jittery.js.ast as js_ast
 
 class CompileError(Exception): pass
 
@@ -16,5 +19,12 @@ class Compiler:
     self.js_ast = JSTransformer().visit(self.py_ast)
 
   def compile(self):
-    json_ = json.dumps(self.js_ast, cls=js_ast.NodeJSONEncoder)
-    result = subprocess.check_output(['node', 'js/jittery-codegen/index.js'])
+    package_dir = os.path.dirname(jittery.__file__)
+    ast_json = json.dumps(self.js_ast, cls=js_ast.NodeJSONEncoder)
+    stdin = tempfile.NamedTemporaryFile()
+    stdin.write(ast_json.encode('utf-8'))
+    stdin.seek(0)
+    result = subprocess.check_output(
+      ['node', '%s/js/jittery-codegen/index.js' % package_dir],
+      stdin=stdin)
+    return result

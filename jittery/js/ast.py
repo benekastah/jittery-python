@@ -10,6 +10,9 @@ class Node():
     self.type = self.__class__.__name__
     self.loc = loc
 
+  def __iter__(self):
+    yield self
+
 class NodeJSONEncoder(json.JSONEncoder):
   def default(self, node):
     return node.__dict__
@@ -45,7 +48,6 @@ class Function(Node):
     self.rest = rest
     self.body = body
     self.generator = generator
-    self.expression = isinstance(body, Expression)
     super().__init__(**kwargs)
 
 class EmptyStatement(Statement): pass
@@ -264,10 +266,10 @@ class CallExpression(Expression):
     super().__init__(**kwargs)
 
 class MemberExpression(Expression):
-  def __init__(self, object, property, **kwargs):
+  def __init__(self, object, property, computed=False, **kwargs):
     self.object = object
     self.property = property
-    self.computed = isinstance(self.property, Expression)
+    self.computed = computed
     super().__init__(**kwargs)
 
 class YieldExpression(Expression):
