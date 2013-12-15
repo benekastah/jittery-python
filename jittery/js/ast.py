@@ -3,19 +3,74 @@ javascript AST documented here:
 https://developer.mozilla.org/en-US/docs/SpiderMonkey/Parser_API
 """
 
+import inspect
 import json
+import types
 
-class Node():
-  def __init__(self, loc=None):
-    self.type = self.__class__.__name__
-    self.loc = loc
-
+class JSBase():
   def __iter__(self):
     yield self
 
-class NodeJSONEncoder(json.JSONEncoder):
+class Node(JSBase):
+  __properties__ = set(['loc'])
+  def __init__(self, *kwargs):
+    self.type = self.__class__.__name__
+    props = set()
+    for cls in inspect.getmro(self.__class__):
+      props |= cls.__properties__
+    for prop in props:
+      setattr(self, prop, kwargs[prop])
+
+  def _block_property(Class, prop_name):
+    self._properties(Class, set([prop_name]))
+    _prop_name = '_%s' % prop_name
+
+    def get_prop(self):
+      return getattr(self, _prop_name)
+
+    def set_prop(self, value):
+      if value and not isinstance(value, BlockStatement):
+        value = BlockStatement(value)
+      setattr(self, _prop_name, value)
+
+    def del_prop(self):
+      delattr(self, _prop_name)
+
+    prop = property(get_prop, set_prop, del_prop)
+    setattr(Class, prop_name, prop)
+
+  def _properties(Class, props):
+    setattr(Class, '__properties__',
+            getattr(Class, '__properties__', set()) | props)
+
+  def properties(*props):
+    def wrapper(Class):
+      self._properties(Class, set(props))
+      return Class
+    return wrapper
+
+  def block_properties(*props):
+    def wrapper(Class):
+      for prop in props:
+        Node._block_property(Class, prop)
+      return Class
+    return wrapper
+
+class JSONEncoder(json.JSONEncoder):
   def default(self, node):
-    return node.__dict__
+    if isinstance(node, Node):
+      dict_ = {}
+      for p in dir(node):
+        if not p.startswith('_'):
+          v = getattr(node, p)
+          if isinstance(v, property):
+            v = v()
+          dict_[p] = v
+      return dict_
+    elif isinstance(node, Operator):
+      return node.operator
+    else:
+      return node.__dict__
 
 class Statement(Node): pass
 class Declaration(Statement): pass
@@ -35,17 +90,19 @@ class Position():
     assert self.line >= 1
     assert self.column >= 0
 
+@Node.properties('body')
 class Program(Node):
   def __init__(self, body, **kwargs):
     self.body = body
     super().__init__(**kwargs)
 
+@Node.block_properties('body')
 class Function(Node):
   def __init__(self, params, body, id=None, defaults=None, rest=None, generator=False, **kwargs):
     self.id = id
     self.params = params
-    self.defaults = defaults
-    self.rest = rest
+    # self.defaults = defaults
+    # self.rest = rest
     self.body = body
     self.generator = generator
     super().__init__(**kwargs)
@@ -62,6 +119,7 @@ class ExpressionStatement(Statement):
     self.expression = expression
     super().__init__(**kwargs)
 
+@Node.block_properties('consequent', 'alternate')
 class IfStatement(Statement):
   def __init__(self, test, consequent, alternate=None, **kwargs):
     self.test = test
@@ -108,6 +166,7 @@ class ThrowStatement(Statement):
     self.argument = argument
     super().__init__(**kwargs)
 
+@Node.block_properties('block', 'handler', 'finalizer')
 class TryStatement(Statement):
   def __init__(self, block, handler=None, finalizer=None, **kwargs):
     self.block = block
@@ -115,18 +174,21 @@ class TryStatement(Statement):
     self.finalizer = finalizer
     super().__init__(**kwargs)
 
+@Node.block_properties('body')
 class WhileStatement(Statement):
   def __init__(self, test, body, **kwargs):
     self.test = test
     self.body = body
     super().__init__(**kwargs)
 
+@Node.block_properties('body')
 class DoWhileStatement(Statement):
   def __init__(self, body, test, **kwargs):
     self.body = body
     self.test = test
     super().__init__(**kwargs)
 
+@Node.block_properties('body')
 class ForStatement(Statement):
   def __init__(self, body, init=None, test=None, update=None, **kwargs):
     self.body = body
@@ -135,6 +197,7 @@ class ForStatement(Statement):
     self.update = update
     super().__init__(**kwargs)
 
+@Node.block_properties('body')
 class ForInStatement(Statement):
   def __init__(self, left, right, body, each, **kwargs):
     self.left = left
@@ -143,6 +206,7 @@ class ForInStatement(Statement):
     self.each = each
     super().__init__(**kwargs)
 
+@Node.block_properties('body')
 class ForOfStatement(Statement):
   def __init__(self, left, right, body, **kwargs):
     self.left = left
@@ -150,6 +214,7 @@ class ForOfStatement(Statement):
     self.body = body
     super().__init__(**kwargs)
 
+@Node.block_properties('body')
 class LetStatement(Statement):
   def __init__(self, head, body, **kwargs):
     self.head = head
@@ -201,18 +266,13 @@ class ObjectKey():
 
 class FunctionExpression(Function, Expression): pass
 
-class ArrowExpression(Function, Expression):
-  def __init__(self, **kwargs):
-    assert 'id' not in kwargs
-    super().__init__(**kwargs)
-
 class SequenceExpression(Expression):
   def __init__(self, expressions, **kwargs):
     self.expressions = expressions
     super().__init__(**kwargs)
 
 class UnaryExpression(Expression):
-  def __init__(self, operator, prefix, argument, **kwargs):
+  def __init__(self, operator, argument, prefix=True, **kwargs):
     self.operator = operator
     self.prefix = prefix
     self.argument = argument
@@ -315,22 +375,28 @@ class Literal(Expression, Node):
     self.value = value
     super().__init__(**kwargs)
 
-def operators(*ops):
-  _ops = set(ops)
-  def wrapped(op):
-    assert op in _ops, '"%s" not in %s' % (op, _ops)
-    return op
-  return wrapped
+class Operator(JSBase):
+  valid_ops = set()
 
-UnaryOperator = operators('-', '+', '!', '~', 'typeof', 'void', 'delete')
+  def __init__(self, op):
+    assert op in self.valid_ops, \
+      '"%s" is not a valid %s' % (op, self.__class__.__name__)
+    self.operator = op
 
-BinaryOperator = operators('==', '!=', '===', '!==' , '<', '<=', '>', '>=' ,
-                           '<<', '>>', '>>>' , '+', '-', '*', '/', '%' , '|',
-                           '^', '&', 'in', 'instanceof')
+class UnaryOperator(Operator):
+  valid_ops = set(('-', '+', '!', '~', 'typeof', 'void', 'delete'))
 
-LogicalOperator = operators('||', '&&')
+class BinaryOperator(Operator):
+  valid_ops = set(('==', '!=', '===', '!==' , '<', '<=', '>', '>=' ,
+                   '<<', '>>', '>>>' , '+', '-', '*', '/', '%' , '|',
+                   '^', '&', 'in', 'instanceof'))
 
-AssignmentOperator = operators('=', '+=', '-=', '*=', '/=', '%=' , '<<=',
-                               '>>=', '>>>=', '|=', '^=', '&=')
+class LogicalOperator(Operator):
+  valid_ops = set(('||', '&&'))
 
-UpdateOperator = operators('--', '++')
+class AssignmentOperator(Operator):
+  valid_ops = set(('=', '+=', '-=', '*=', '/=', '%=' , '<<=',
+                   '>>=', '>>>=', '|=', '^=', '&='))
+
+class UpdateOperator(Operator):
+  valid_ops = set(('--', '++'))

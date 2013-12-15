@@ -1,153 +1,130 @@
-import ast
-from jittery.utils import print_node
 
-class Context:
-    def __init__(self, stack, class_name = None):
-        self.stack = stack
-        self.class_name = class_name
+import copy
 
-        self.globals = []
-        self.arguments = []
-        self.locals = []
-        self.types = {}
+import jittery.js.ast as js_ast
 
-        self.is_module_context = False
-        self.is_class_context = False
-        self.exports = []
+class NonlocalError(Exception): pass
+class ContextNotFound(Exception):
+  def __init__(self, name):
+    super().__init__('%s not found in any context' % name)
 
-        if not self.stack:
-            self.is_module_context = True
+class Context():
+  def __init__(self, base_obj=None, nonlocals=None):
+    if nonlocals is None:
+      nonlocals = []
+    self.base_obj = base_obj
+    self.nonlocals = nonlocals
+    self.vars = {}
 
-        if class_name:
-            self.is_class_context = True
+  def to_js(self, name):
+    ident = js_ast.Identifier(name)
+    if self.base_obj:
+      return js_ast.MemberExpression(
+        object=self.base_obj,
+        property=ident)
+    else:
+      return ident
 
-    @staticmethod
-    def _get_key_id(key):
-        if isinstance(key, str):
-            return key
-        elif isinstance(key, ast.Name):
-            return key.id
-        elif isinstance(key, ast.Str):
-            return key.s
-        else:
-            raise Exception("Invalid key: %s" % str(key))
+  def __setitem__(self, name, codename=None):
+    if name in self.nonlocals:
+      raise NonlocalError()
+    self.vars[name] = self.to_js(codename or name)
 
-    def _key_is_in(self, key, ls):
-        id = self._get_key_id(key)
-        return id in ls
+  def __getitem__(self, name):
+    return self.vars[name]
 
-    def is_local(self, key):
-        return self._key_is_in(key, self.locals) or self.is_argument(key)
+  def __delitem__(self, name):
+    if name in self.nonlocals:
+      raise NonlocalError()
+    del self.vars[name]
 
-    def is_argument(self, key):
-        return self._key_is_in(key, self.arguments)
+  def __contains__(self, name):
+    return name in self.vars
 
-    def is_global(self, key):
-        return self._key_is_in(key, self.globals)
+class ContextStack():
+  def __init__(self, global_ctx=None):
+    if not global_ctx:
+      global_ctx = Context()
+    self.stack = []
+    self.global_ctx = global_ctx
+    self.stack.append(self.global_ctx)
 
-    def is_export(self, key):
-        return self._key_is_in(key, self.exports)
-
-    def _set(self, key, include = True, ls = None):
-        if ls is None:
-            ls = self.locals
-
-        if ls is self.locals:
-            other_ls = self.exports if self.is_module_context or self.is_class_context else self.arguments
-        else:
-            other_ls = self.locals
-
-        id = self._get_key_id(key)
-        already_in_ls = id in ls
-        already_in_other = id in other_ls
-
-        if include and (self.is_module_context or id not in self.globals) and not already_in_other and not already_in_ls:
-            ls.append(id)
-        elif not include and already_in_ls:
-            index = ls.index(id)
-            del ls[index]
-
-    def get_vars(self, should_get_vars = True):
-        from jittery.compiler import JSCode
-        if should_get_vars:
-            if self.locals:
-                return JSCode("var %s" % ', '.join(self.locals))
-        return JSCode("")
-
-    def set_local(self, key):
-        self._set(key, ls = self.locals)
-
-    def set_global(self, key):
-        id = self._get_key_id(key)
-        if id in self.locals:
-            self._set(id, False)
-            print("SyntaxWarning: name '%s' is assigned to before global declaration" % id)
-
-        self.globals.append(id)
-
-    def set_argument(self, arg):
-        self._set(arg, ls = self.arguments)
-
-    def set_export(self, exp):
-        self._set(exp, ls = self.exports)
-
-    def type(self, item, _type = None):
-        id = self._get_key_id(item)
-        if _type:
-            self.types[id] = self._get_key_id(_type)
-        else:
-            try:
-                return self.types[id]
-            except KeyError:
-                pass
-
-
-class ContextStack(list):
-    def new(self, class_name = None):
-        ctx = Context(self, class_name)
-        self.append(ctx)
+  def find_context(self, name, mode='get'):
+    assert mode in ('get', 'set', 'del')
+    find_existing = mode in ('get', 'del')
+    for ctx in reversed(self.stack):
+      if not find_existing and name in ctx.nonlocals:
+        find_existing = True
+        break
+      if not find_existing or name in ctx:
         return ctx
+    raise ContextNotFound(name)
 
-    @staticmethod
-    def _get_key_id(item):
-        if isinstance(item, ast.Attribute):
-            return ContextStack._get_key_id(item.value)
-        else:
-            try:
-                return Context._get_key_id(item)
-            except:
-                pass
+  def assign(self, name, val):
+    ctx = self.find_context(name, mode='set')
+    exists = name in ctx
+    if exists:
+      left = ctx[name]
+    else:
+      ctx[name] = None
+      left = ctx[name]
+    if exists or not isinstance(left, js_ast.Identifier):
+      return js_ast.ExpressionStatement(
+        js_ast.AssignmentExpression(
+          operator=js_ast.AssignmentOperator('='),
+          left=left,
+          right=val))
+    else:
+      return js_ast.VariableDeclaration(
+        declarations=[
+          js_ast.VariableDeclarator(
+            id=left,
+            init=val)
+        ])
 
-    def find(self, name):
-        if not self:
-            return None
+  def __setitem__(self, name, val=None):
+    ctx = self.find_context(name, mode='set')
+    ctx[name] = val
 
-        id = self._get_key_id(name)
-        if not id:
-            return None
+  def __getitem__(self, name):
+    ctx = self.find_context(name)
+    return ctx[name]
 
-        ctx = name.ctx
-        last_context = self[-1]
-        if isinstance(ctx, ast.Store):
-            context = last_context
-        else:
-            context = None
-            for c in reversed(self):
-                if c.is_local(id) or c.is_export(id):
-                    if c.is_class_context and c is not last_context:
-                        continue
-                    context = c
-                    break
-            if not context:
-                context = self[0]
-        if context.is_global(id):
-            return self[0]
-        else:
-            return context
+  def __delitem__(self, name):
+    ctx = self.find_context(name, mode='del')
+    del ctx[name]
 
-    def find_type(self, item):
-        if isinstance(item, ast.Attribute):
-            return None
-        context = self.find(item)
-        if context:
-            return context.type(item)
+  def __contains__(self, name):
+    try:
+      ctx = self.find_context(name)
+      return True
+    except ContextNotFound:
+      return False
+
+  def __len__(self):
+    return len(self.stack)
+
+  def append(self, ctx=None):
+    ctx = ctx or Context()
+    self.stack.append(ctx)
+    return ctx
+
+  def pop(self):
+    return self.stack.pop()
+
+  def temporary(self, ctx=None):
+    return TemporaryContext(self, ctx)
+
+class TemporaryContext():
+  def __init__(self, context, ctx=None):
+    self.context = context
+    self.arg = ctx
+
+  def __enter__(self):
+    if self.arg is not None:
+      return self.context.append(self.arg)
+    else:
+      return self.context.append()
+
+  def __exit__(self, exception_type, exception_value, traceback):
+    self.context.pop()

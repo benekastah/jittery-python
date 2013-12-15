@@ -1,8 +1,8 @@
 # from jsfile2 import B
 
 # class A(B):
-#     def __init__(self):
-#         super().__init__(10)
+#   def __init__(self):
+#     super().__init__(10)
 
 # a = A()
 # print(a.a, a.x, a.y)
@@ -16,10 +16,10 @@ print(tp)
 
 
 class A:
-    a = 5
-    b = a + 2
-    def c(self):
-        return a + b
+  a = 5
+  b = a + 2
+  def c(self):
+    return a + b
 
 a = A()
 print(a.a, a.b)
