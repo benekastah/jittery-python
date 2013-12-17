@@ -1,3 +1,3 @@
-[submodule "jittery/js/src/google-closure"]
-	path = jittery/js/src/google_closure
-	url = https://code.google.com/p/closure-library/
+[submodule "jittery/js/src/closure-library"]
+	path = jittery/js/src/closure-library
+	url = http://code.google.com/p/closure-library/

@@ -57,7 +57,7 @@ def initialize_dist():
   shutil.copytree(js_dir, dist)
 
 def optimize_package(package):
-  closurebuilder = 'dist/google_closure/closure/bin/build/closurebuilder.py'
+  closurebuilder = 'dist/closure-library/closure/bin/build/closurebuilder.py'
   roots = []
   dist = 'dist'
   for dirname in os.listdir(dist):
