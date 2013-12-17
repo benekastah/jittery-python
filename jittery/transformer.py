@@ -29,15 +29,13 @@ def object_path(*names):
   if len(parts) > 1:
     return js_ast.MemberExpression(
       object=object_path(*parts),
-      property=js_ast.Literal(last),
-      computed=True)
+      property=js_ast.Identifier(last))
   elif len(parts) == 0:
     return js_ast.Identifier(last)
   else:
     return js_ast.MemberExpression(
       object=js_ast.Identifier(parts[0]),
-      property=js_ast.Literal(last),
-      computed=True)
+      property=js_ast.Identifier(last))
 
 def goog_require(name):
   req = js_ast.MemberExpression(
@@ -82,11 +80,13 @@ class JSTransformer(ast.NodeTransformer):
         ])
       entry_name = '%s.__entry_point__' % self.package
       main_body += [
-        goog_provide(entry_name),
+        goog_require(imprt),
         js_ast.ExpressionStatement(
-          js_ast.AssignmentExpression(
-            left=object_path(entry_name),
-            right=entry))
+          js_ast.CallExpression(
+            callee=object_path(imprt),
+            arguments=[js_ast.Literal('__main__')]
+          )
+        ),
       ]
     with self.context.temporary() as file_ctx, \
          self.context.temporary() as module_ctx:

@@ -65,16 +65,14 @@ def optimize_package(package):
     if os.path.isdir(dirname):
       roots.append('--root=%s' % dirname)
   namespace = '--namespace=%s.__main__' % package
-  namespace_jittery = '--namespace=jittery.module.__import__'
   output_mode = '--output_mode=compiled'
   compiler = '--compiler_jar=dist/google_closure/compiler/compiler.jar'
   output_file = '--output_file=dist/%s.js' % package
   compiler_flags = list(map(lambda f: '--compiler_flags=%s' % f, [
     '--compilation_level=ADVANCED_OPTIMIZATIONS',
-    '--closure_entry_point=%s.__entry_point__' % package,
-    '--process_closure_primitives',
+    # '--closure_entry_point=%s.__entry_point__' % package,
+    # '--process_closure_primitives',
   ]))
   subprocess.call([
-    'python', closurebuilder, namespace_jittery, namespace, output_mode,
-    compiler, output_file
+    'python', closurebuilder, namespace, output_mode, compiler, output_file
   ] + roots + compiler_flags)

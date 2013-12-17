@@ -20,8 +20,7 @@ class Context():
     if self.base_obj:
       return js_ast.MemberExpression(
         object=self.base_obj,
-        property=js_ast.Literal(name),
-        computed=True)
+        property=js_ast.Identifier(name))
     else:
       return js_ast.Identifier(name)
 

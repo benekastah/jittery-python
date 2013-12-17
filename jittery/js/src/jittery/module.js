@@ -1,9 +1,10 @@
-(function (undefined) {
+(function (exports, undefined) {
 
   goog.provide('jittery.module.module');
   goog.provide('jittery.module.ImportError');
   goog.provide('jittery.module.__register_module__');
   goog.provide('jittery.module.__import__');
+  exports['jittery'] = jittery;
 
   var available_modules = {};
 
@@ -45,4 +46,4 @@
     return resolved_modules[name];
   };
 
-})();
+})(this);
