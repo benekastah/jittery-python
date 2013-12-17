@@ -66,7 +66,8 @@ def optimize_package(package):
       roots.append('--root=%s' % dirname)
   namespace = '--namespace=%s.__main__' % package
   output_mode = '--output_mode=compiled'
-  compiler = '--compiler_jar=dist/google_closure/compiler/compiler.jar'
+  compiler = '--compiler_jar=%s' % os.path.join(
+    os.path.dirname(jittery.__file__), '../bin/closure_compiler/compiler.jar')
   output_file = '--output_file=dist/%s.js' % package
   compiler_flags = list(map(lambda f: '--compiler_flags=%s' % f, [
     '--compilation_level=ADVANCED_OPTIMIZATIONS',

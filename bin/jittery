@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+
+import sys
+assert sys.version.startswith('3'), 'Python versions below 3 not supported'
+
+import tempfile
+import os
+
+from optparse import OptionParser
+from jittery.compiler import Compiler
+from jittery.transformer import JSTransformer
+import random, subprocess, os
+
+if __name__ == "__main__":
+  opt = OptionParser(usage = "jittery [options] args...", version = "0.1")
+  opt.add_option("-c", "--compile",
+                 help = "Compile the specified file")
+  opt.add_option("-o", "--output",
+                 default = "auto",
+                 help = ("Specify a destination for the compiled result. Default is 'auto'. "
+                         "Specifying auto will use <path_to_source_file>.js as the output file. "
+                         "Specifying 'stdout' will print the result to stdout."))
+  opt.add_option("-i", "--interactive",
+                 action = "store_true",
+                 default = False,
+                 help = "Interactive shell mode for jittery")
+  opt.add_option("-s", "--source",
+                 help = "Set source to compile/eval instead of using a file")
+  opt.add_option("-e", "--eval",
+                 action = "store_true",
+                 default = False,
+                 help = "Eval python as javascript")
+  opt.add_option('-b', '--bare',
+                 action='store_true',
+                 default=False,
+                 help='Compile code in bare mode (not wrapped in a function)')
+  opt.add_option("-p", "--print",
+                 action = "store_true",
+                 default = False,
+                 help = "Print result of compile/eval operation. This is the same as specifying --output=stdout")
+
+  (options, args) = opt.parse_args()
+
+  if options.compile or options.source:
+    source_file = options.compile
+    source = options.source
+    _eval = options.eval
+    out = options.output
+    print_result = getattr(options, 'print')
+    if print_result or out == 'stdout':
+      out = False
+    elif out == "auto":
+      assert source_file, 'Can\'t use out="auto" when no source file is specified'
+      out = '%s.js' % source_file
+
+    if source_file:
+      f = open(source_file)
+      source = f.read()
+      f.close()
+    assert source is not None, 'Nothing to compile'
+
+    compiler = Compiler(source, source_name=source_file, bare=options.bare)
+    result = compiler.compile()
+
+    outfile = None
+    if isinstance(out, str):
+      outfile = open(out, 'w+')
+      outfile.write(result)
+      outfile.close()
+
+    if _eval:
+      if out:
+        fname = out
+      else:
+        outfile = tempfile.NamedTemporaryFile(suffix='.js')
+        fname = outfile.name
+        outfile.write(result)
+        outfile.flush()
+        outfile.seek(0)
+
+      done = False
+      try:
+        result = subprocess.check_output(["node", fname])
+        result = result.decode('utf8')
+      except subprocess.CalledProcessError as e:
+        exit(1)
+
+    if print_result:
+        print(result.decode('utf-8') if isinstance(result, bytes) else result)
+  else:
+    print("No command given. Use `jittery -h` or `jittery --help` for information.")
+    exit(1)
