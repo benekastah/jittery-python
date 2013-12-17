@@ -17,13 +17,13 @@ class Context():
     self.vars = {}
 
   def to_js(self, name):
-    ident = js_ast.Identifier(name)
     if self.base_obj:
       return js_ast.MemberExpression(
         object=self.base_obj,
-        property=ident)
+        property=js_ast.Literal(name),
+        computed=True)
     else:
-      return ident
+      return js_ast.Identifier(name)
 
   def __setitem__(self, name, codename=None):
     if name in self.nonlocals:

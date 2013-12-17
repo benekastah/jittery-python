@@ -16,12 +16,14 @@ def compile(*args, **kwargs):
 class CompileError(Exception): pass
 
 class Compiler:
-  def __init__(self, source, source_name=None, bare=False):
+  def __init__(self, source, module_name='__main__', package=None,
+               source_name=None, bare=False):
     self.source = source
     self.source_name = source_name
     self.py_ast = ast.parse(self.source)
     self.context = jittery.context.ContextStack()
-    self.js_ast = JSTransformer(self.context, bare=bare).visit(self.py_ast)
+    self.js_ast = JSTransformer(
+      module_name, self.context, package, bare=bare).visit(self.py_ast)
 
   def compile(self):
     package_dir = os.path.dirname(jittery.__file__)
@@ -33,4 +35,4 @@ class Compiler:
     result = subprocess.check_output(
       ['node', '%s/js/jittery-codegen/index.js' % package_dir],
       stdin=stdin)
-    return result
+    return result.decode('utf-8')

@@ -12,25 +12,47 @@ class JSBase():
     yield self
 
 class Node(JSBase):
-  __properties__ = set(['loc'])
-  def __init__(self, *kwargs):
-    self.type = self.__class__.__name__
-    props = set()
-    for cls in inspect.getmro(self.__class__):
-      props |= cls.__properties__
-    for prop in props:
-      setattr(self, prop, kwargs[prop])
+  __properties__ = {
+    'loc': {'default': None},
+    'type': {'set_default': lambda self: self.__class__.__name__}
+  }
+  def __init__(self, **kwargs):
+    props = self.get_properties()
+    for prop, attrs in props.items():
+      if 'default' in attrs:
+        value = kwargs.get(prop, attrs['default'])
+      elif 'set_default' in attrs:
+        should_set = object()
+        value = kwargs.get(prop, should_set)
+        if value is should_set:
+          value = attrs['set_default'](self)
+      else:
+        value = kwargs[prop]
+      allowed = attrs.get('in', None)
+      if allowed:
+        assert value in allowed, (
+          'Value %s for %s not allowed. '
+          'Should be one of %s'
+        ) % (valu, prop, allowed)
+      setattr(self, prop, value)
 
-  def _block_property(Class, prop_name):
-    self._properties(Class, set([prop_name]))
+  def get_properties(self):
+    props = {}
+    for cls in inspect.getmro(self.__class__):
+      cls_props = getattr(cls, '__properties__', None)
+      if cls_props:
+        props.update(cls_props)
+    return props
+
+  def _typed_property(Class, prop_name, Type):
     _prop_name = '_%s' % prop_name
 
     def get_prop(self):
       return getattr(self, _prop_name)
 
     def set_prop(self, value):
-      if value and not isinstance(value, BlockStatement):
-        value = BlockStatement(value)
+      if value is not None and not isinstance(value, Type):
+        value = Type(value)
       setattr(self, _prop_name, value)
 
     def del_prop(self):
@@ -40,19 +62,15 @@ class Node(JSBase):
     setattr(Class, prop_name, prop)
 
   def _properties(Class, props):
-    setattr(Class, '__properties__',
-            getattr(Class, '__properties__', set()) | props)
+    Class.__properties__ = props
 
-  def properties(*props):
+  def properties(**props):
     def wrapper(Class):
-      self._properties(Class, set(props))
-      return Class
-    return wrapper
-
-  def block_properties(*props):
-    def wrapper(Class):
-      for prop in props:
-        Node._block_property(Class, prop)
+      for prop, attrs in props.items():
+        Type = attrs.get('type', None)
+        if Type:
+          Node._typed_property(Class, prop, Type)
+      Node._properties(Class, props)
       return Class
     return wrapper
 
@@ -60,12 +78,8 @@ class JSONEncoder(json.JSONEncoder):
   def default(self, node):
     if isinstance(node, Node):
       dict_ = {}
-      for p in dir(node):
-        if not p.startswith('_'):
-          v = getattr(node, p)
-          if isinstance(v, property):
-            v = v()
-          dict_[p] = v
+      for p, _ in node.get_properties().items():
+        dict_[p] = getattr(node, p)
       return dict_
     elif isinstance(node, Operator):
       return node.operator
@@ -90,136 +104,114 @@ class Position():
     assert self.line >= 1
     assert self.column >= 0
 
-@Node.properties('body')
-class Program(Node):
+@Node.properties(body={})
+class Program(Node): pass
+
+@Node.properties(body={})
+class BlockStatement(Statement):
   def __init__(self, body, **kwargs):
-    self.body = body
+    kwargs['body'] = body
     super().__init__(**kwargs)
 
-@Node.block_properties('body')
-class Function(Node):
-  def __init__(self, params, body, id=None, defaults=None, rest=None, generator=False, **kwargs):
-    self.id = id
-    self.params = params
-    # self.defaults = defaults
-    # self.rest = rest
-    self.body = body
-    self.generator = generator
-    super().__init__(**kwargs)
+@Node.properties(
+  params={},
+  body={'type': BlockStatement},
+  id={'default': None},
+  defaults={'default': None},
+  rest={'default': None},
+  generator={'default': None})
+class Function(Node): pass
 
 class EmptyStatement(Statement): pass
 
-class BlockStatement(Statement):
-  def __init__(self, body, **kwargs):
-    self.body = body
-    super().__init__(**kwargs)
-
+@Node.properties(
+  expression={})
 class ExpressionStatement(Statement):
   def __init__(self, expression, **kwargs):
-    self.expression = expression
+    kwargs['expression'] = expression
     super().__init__(**kwargs)
 
-@Node.block_properties('consequent', 'alternate')
-class IfStatement(Statement):
-  def __init__(self, test, consequent, alternate=None, **kwargs):
-    self.test = test
-    self.consequent = consequent
-    self.alternate = alternate
-    super().__init__(**kwargs)
+@Node.properties(
+  test={},
+  consequent={'type': BlockStatement},
+  alternate={'type': BlockStatement, 'default': None})
+class IfStatement(Statement): pass
 
-class LabeledStatement(Statement):
-  def __init__(self, label, body, **kwargs):
-    self.label = label
-    self.body = body
-    super().__init__(**kwargs)
+@Node.properties(
+  label={},
+  body={})
+class LabeledStatement(Statement): pass
 
-class BreakStatement(Statement):
-  def __init__(self, label=None, **kwargs):
-    self.label = label
-    super().__init__(**kwargs)
+@Node.properties(
+  label={'default': None})
+class BreakStatement(Statement): pass
 
-class ContinueStatement(Statement):
-  def __init__(self, label=None, **kwargs):
-    self.label = label
-    super().__init__(**kwargs)
+@Node.properties(
+  label={'default': None})
+class ContinueStatement(Statement): pass
 
-class WithStatement(Statement):
-  def __init__(self, object, body, **kwargs):
-    self.object = object
-    self.body = body
-    super().__init__(**kwargs)
+@Node.properties(
+  object={},
+  body={'type': BlockStatement})
+class WithStatement(Statement): pass
 
-class SwitchStatement(Statement):
-  def __init__(self, discriminant, cases, lexical, **kwargs):
-    self.discriminant = discriminant
-    self.cases = cases
-    self.lexical = lexical
-    super().__init__(**kwargs)
+@Node.properties(
+  discriminant={},
+  cases={},
+  lexical={})
+class SwitchStatement(Statement): pass
 
+@Node.properties(
+  argument={'default': None})
 class ReturnStatement(Statement):
   def __init__(self, argument=None, **kwargs):
-    self.argument = argument
+    kwargs['argument'] = argument
     super().__init__(**kwargs)
 
-class ThrowStatement(Statement):
-  def __init__(self, argument, **kwargs):
-    self.argument = argument
-    super().__init__(**kwargs)
+@Node.properties(
+  argument={})
+class ThrowStatement(Statement): pass
 
-@Node.block_properties('block', 'handler', 'finalizer')
-class TryStatement(Statement):
-  def __init__(self, block, handler=None, finalizer=None, **kwargs):
-    self.block = block
-    self.handler = handler
-    self.finalizer = finalizer
-    super().__init__(**kwargs)
+@Node.properties(
+  block={'type': BlockStatement},
+  handler={'default': None, 'type': BlockStatement},
+  finalizer={'default': None, 'type': BlockStatement})
+class TryStatement(Statement): pass
 
-@Node.block_properties('body')
-class WhileStatement(Statement):
-  def __init__(self, test, body, **kwargs):
-    self.test = test
-    self.body = body
-    super().__init__(**kwargs)
+@Node.properties(
+  test={},
+  body={'type': BlockStatement})
+class WhileStatement(Statement): pass
 
-@Node.block_properties('body')
-class DoWhileStatement(Statement):
-  def __init__(self, body, test, **kwargs):
-    self.body = body
-    self.test = test
-    super().__init__(**kwargs)
+@Node.properties(
+  body={'type': BlockStatement},
+  test={})
+class DoWhileStatement(Statement): pass
 
-@Node.block_properties('body')
-class ForStatement(Statement):
-  def __init__(self, body, init=None, test=None, update=None, **kwargs):
-    self.body = body
-    self.init = init
-    self.test = test
-    self.update = update
-    super().__init__(**kwargs)
+@Node.properties(
+  body={'type': BlockStatement},
+  init={'default': None},
+  test={'default': None},
+  update={'default': None})
+class ForStatement(Statement): pass
 
-@Node.block_properties('body')
-class ForInStatement(Statement):
-  def __init__(self, left, right, body, each, **kwargs):
-    self.left = left
-    self.right = right
-    self.body = body
-    self.each = each
-    super().__init__(**kwargs)
+@Node.properties(
+  left={},
+  right={},
+  body={'type': BlockStatement},
+  each={})
+class ForInStatement(Statement): pass
 
-@Node.block_properties('body')
-class ForOfStatement(Statement):
-  def __init__(self, left, right, body, **kwargs):
-    self.left = left
-    self.right = right
-    self.body = body
-    super().__init__(**kwargs)
+@Node.properties(
+  left={},
+  right={},
+  body={'type': BlockStatement})
+class ForOfStatement(Statement): pass
 
-@Node.block_properties('body')
-class LetStatement(Statement):
-  def __init__(self, head, body, **kwargs):
-    self.head = head
-    self.body = body
-    super().__init__(**kwargs)
+@Node.properties(
+  head={},
+  body={'type': BlockStatement})
+class LetStatement(Statement): pass
 
 class LetHeadEntry():
   def __init__(self, id, init=None):
@@ -228,35 +220,29 @@ class LetHeadEntry():
 
 class DebuggerStatement(Statement): pass
 
-class FunctionDeclaration(Function, Declaration):
-  def __init__(self, id, **kwargs):
-    kwargs['id'] = id
-    super().__init__(**kwargs)
+@Node.properties(
+  id={})
+class FunctionDeclaration(Function, Declaration): pass
 
-class VariableDeclaration(Declaration):
-  def __init__(self, declarations, kind='var', **kwargs):
-    self.declarations = declarations
-    self.kind = kind
-    assert self.kind in ('var', 'let', 'const')
-    super().__init__(**kwargs)
+@Node.properties(
+  declarations={},
+  kind={'default': 'var', 'in': ('var', 'let', 'const')})
+class VariableDeclaration(Declaration): pass
 
-class VariableDeclarator(Node):
-  def __init__(self, id, init=None, **kwargs):
-    self.id = id
-    self.init = init
-    super().__init__(**kwargs)
+@Node.properties(
+  id={},
+  init={'default': None})
+class VariableDeclarator(Node): pass
 
 class ThisExpression(Expression): pass
 
-class ArrayExpression(Expression):
-  def __init__(self, elements, **kwargs):
-    self.elements = elements
-    super().__init__(**kwargs)
+@Node.properties(
+  elements={'default': []})
+class ArrayExpression(Expression): pass
 
-class ObjectExpression(Expression):
-  def __init__(self, properties, **kwargs):
-    self.properties = properties
-    super().__init__(**kwargs)
+@Node.properties(
+  properties={'default': []})
+class ObjectExpression(Expression): pass
 
 class ObjectKey():
   def __init__(self, key, value, kind='init'):
@@ -266,113 +252,101 @@ class ObjectKey():
 
 class FunctionExpression(Function, Expression): pass
 
-class SequenceExpression(Expression):
-  def __init__(self, expressions, **kwargs):
-    self.expressions = expressions
-    super().__init__(**kwargs)
+@Node.properties(
+  expressions={})
+class SequenceExpression(Expression): pass
 
-class UnaryExpression(Expression):
-  def __init__(self, operator, argument, prefix=True, **kwargs):
-    self.operator = operator
-    self.prefix = prefix
-    self.argument = argument
-    super().__init__(**kwargs)
+@Node.properties(
+  operator={},
+  argument={},
+  prefix={'default': True})
+class UnaryExpression(Expression): pass
 
-class BinaryExpression(Expression):
-  def __init__(self, operator, left, right, **kwargs):
-    self.operator = operator
-    self.left = left
-    self.right = right
-    super().__init__(**kwargs)
+@Node.properties(
+  operator={},
+  left={},
+  right={})
+class BinaryExpression(Expression): pass
 
-class AssignmentExpression(Expression):
-  def __init__(self, operator, left, right, **kwargs):
-    self.operator = operator
-    self.left = left
-    self.right = right
-    super().__init__(**kwargs)
+@Node.properties(
+  operator={'default': '='},
+  left={},
+  right={})
+class AssignmentExpression(Expression): pass
 
-class UpdateExpression(Expression):
-  def __init__(self, operator, argument, prefix, **kwargs):
-    self.operator = operator
-    self.argument = argument
-    self.prefix = prefix
-    super().__init__(**kwargs)
+@Node.properties(
+  operator={},
+  argument={},
+  prefix={})
+class UpdateExpression(Expression): pass
 
-class LogicalExpression(Expression):
-  def __init__(self, operator, left, right, **kwargs):
-    self.operator = operator
-    self.left = left
-    self.right = right
-    super().__init__(**kwargs)
+@Node.properties(
+  operator={},
+  left={},
+  right={})
+class LogicalExpression(Expression): pass
 
-class ConditionalExpression(Expression):
-  def __init__(self, test, alternate, consequent, **kwargs):
-    self.test = test
-    self.alternate = alternate
-    self.consequent = consequent
-    super().__init__(**kwargs)
+@Node.properties(
+  test={},
+  alternate={},
+  consequent={})
+class ConditionalExpression(Expression): pass
 
-class NewExpression(Expression):
-  def __init__(self, callee, arguments, **kwargs):
-    self.callee = callee
-    self.arguments = arguments
-    super().__init__(**kwargs)
+@Node.properties(
+  callee={},
+  arguments={})
+class NewExpression(Expression): pass
 
-class CallExpression(Expression):
-  def __init__(self, callee, arguments, **kwargs):
-    self.callee = callee
-    self.arguments = arguments
-    super().__init__(**kwargs)
+@Node.properties(
+  callee={},
+  arguments={})
+class CallExpression(Expression): pass
 
-class MemberExpression(Expression):
-  def __init__(self, object, property, computed=False, **kwargs):
-    self.object = object
-    self.property = property
-    self.computed = computed
-    super().__init__(**kwargs)
+@Node.properties(
+  object={},
+  property={},
+  computed={'default': False})
+class MemberExpression(Expression): pass
 
-class YieldExpression(Expression):
-  def __init__(self, argument=None, **kwargs):
-    self.argument = argument
-    super().__init__(**kwargs)
+@Node.properties(
+  argument={'default': None})
+class YieldExpression(Expression): pass
 
-class LetExpression(Expression):
-  def __init__(self, head, body, **kwargs):
-    self.head = head
-    self.body = body
-    super().__init__(**kwargs)
+@Node.properties(
+  head={},
+  body={})
+class LetExpression(Expression): pass
 
-class ObjectPattern(Pattern):
-  def __init__(self, properties, **kwargs):
-    self.properties = properties
-    super().__init__(**kwargs)
+@Node.properties(
+  properties={})
+class ObjectPattern(Pattern): pass
 
-class ArrayPattern(Pattern):
-  def __init__(self, elements, **kwargs):
-    self.elements = elements
-    super().__init__(**kwargs)
+@Node.properties(
+  elements={})
+class ArrayPattern(Pattern): pass
 
-class SwitchCase(Node):
-  def __init__(self, consequent, test=None, **kwargs):
-    self.consequent = consequent
-    self.test = test
-    super().__init__(**kwargs)
+@Node.properties(
+  consequent={},
+  test={'default': None})
+class SwitchCase(Node): pass
 
-class CatchClause(Node):
-  def __init__(self, param, body, **kwargs):
-    self.param = param
-    self.body = body
-    super().__init__(**kwargs)
+@Node.properties(
+  param={},
+  body={})
+class CatchClause(Node): pass
 
+@Node.properties(
+  name={})
 class Identifier(Expression, Pattern, Node):
   def __init__(self, name, **kwargs):
-    self.name = name
+    kwargs['name'] = name
     super().__init__(**kwargs)
 
+@Node.properties(
+  value={})
 class Literal(Expression, Node):
   def __init__(self, value, **kwargs):
-    self.value = value
+    kwargs['value'] = value
     super().__init__(**kwargs)
 
 class Operator(JSBase):

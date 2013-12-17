@@ -23,38 +23,106 @@ def _makeBinaryExpression(op, left, right):
       left=left,
       right=right)
 
+def object_path(*names):
+  name = '.'.join(names)
+  *parts, last = name.split('.')
+  if len(parts) > 1:
+    return js_ast.MemberExpression(
+      object=object_path(*parts),
+      property=js_ast.Literal(last),
+      computed=True)
+  elif len(parts) == 0:
+    return js_ast.Identifier(last)
+  else:
+    return js_ast.MemberExpression(
+      object=js_ast.Identifier(parts[0]),
+      property=js_ast.Literal(last),
+      computed=True)
+
+def goog_require(name):
+  req = js_ast.MemberExpression(
+    object=js_ast.Identifier('goog'),
+    property=js_ast.Identifier('require'))
+  return js_ast.ExpressionStatement(
+    js_ast.CallExpression(
+      callee=req,
+      arguments=[js_ast.Literal(name)]))
+
+def goog_provide(name):
+  provide = js_ast.MemberExpression(
+    object=js_ast.Identifier('goog'),
+    property=js_ast.Identifier('provide'))
+  return js_ast.ExpressionStatement(
+    js_ast.CallExpression(
+      callee=provide,
+      arguments=[js_ast.Literal(name)]))
+
 class JSTransformer(ast.NodeTransformer):
-  def __init__(self, context, bare=False, **kwargs):
+  def __init__(self, module_name, context, package, bare=False, **kwargs):
     self.context = context
     self.bare = bare
-    super().__init__(**kwargs)
+    self.module_name = module_name
+    self.package = package
+    super().__init__()
 
   def visit_Module(self, node):
+    main_body = []
+    if self.module_name == '__main__':
+      imprt = 'jittery.module.__import__'
+      entry = js_ast.FunctionExpression(
+        params=[],
+        body=[
+          goog_require(imprt),
+          js_ast.ExpressionStatement(
+            js_ast.CallExpression(
+              callee=object_path(imprt),
+              arguments=[js_ast.Literal('__main__')]
+            )
+          ),
+        ])
+      entry_name = '%s.__entry_point__' % self.package
+      main_body += [
+        goog_provide(entry_name),
+        js_ast.ExpressionStatement(
+          js_ast.AssignmentExpression(
+            left=object_path(entry_name),
+            right=entry))
+      ]
     with self.context.temporary() as file_ctx, \
          self.context.temporary() as module_ctx:
       file_ctx['__module__'] = None
-      module_id = js_ast.Identifier('__module__')
-      module_obj = js_ast.ObjectExpression(
-        properties=[])
-      module_ctx.base_obj = module_id
-      name = self.context.assign('__name__', js_ast.Literal('__main__'))
+      module_id = file_ctx['__module__']
+      provide_module = self.module_name
+      if self.module_name == '__main__' and self.package:
+        provide_module = '%s.%s' % (self.package, self.module_name)
+      module_ctx.base_obj = object_path(provide_module)
+      name = self.context.assign('__name__', js_ast.Literal(self.module_name))
       self.generic_visit(node)
       if self.bare:
         return js_ast.Program(body=node.body)
       else:
         body = [
+          goog_provide(provide_module),
+          js_ast.ExpressionStatement(
+            js_ast.AssignmentExpression(
+              left=module_ctx.base_obj,
+              right=module_id)),
           name
-        ] + node.body + [
-          js_ast.ReturnStatement(module_id)
-        ]
-        func = js_ast.FunctionExpression(
+        ] + node.body
+        module_func = js_ast.FunctionExpression(
           params=[module_id],
           body=body)
         call = js_ast.CallExpression(
-          callee=func,
-          arguments=[module_obj])
-        expr = js_ast.ExpressionStatement(call)
-        return js_ast.Program(body=[expr])
+          callee=object_path('jittery.module.__register_module__'),
+          arguments=[
+            js_ast.Literal(self.module_name),
+            module_func,
+          ])
+        return js_ast.Program(body=[
+          goog_provide(self.package),
+          goog_require('jittery.module.__register_module__'),
+          js_ast.ExpressionStatement(call),
+        ] + main_body)
 
   def visit_Expr(self, node):
     self.generic_visit(node)
@@ -108,7 +176,7 @@ class JSTransformer(ast.NodeTransformer):
     assert not node.keywords, 'Keyword arguments not supported'
     assert not node.starargs, 'Starargs/rest arguments not supported'
     assert not node.kwargs, 'Keyword arguments not supported'
-    return js_ast.CallExpression(node.func, node.args)
+    return js_ast.CallExpression(callee=node.func, arguments=node.args)
 
   def visit_Name(self, node):
     name = node.id
@@ -120,8 +188,8 @@ class JSTransformer(ast.NodeTransformer):
   def visit_Attribute(self, node):
     self.generic_visit(node)
     return js_ast.MemberExpression(
-      node.value,
-      js_ast.Identifier(node.attr))
+      object=node.value,
+      property=js_ast.Identifier(node.attr))
 
   def visit_FunctionDef(self, node):
     # print(ast.dump(node))
