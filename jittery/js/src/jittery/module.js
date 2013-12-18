@@ -17,7 +17,7 @@
     goog.inherits(ImportError, Error);
 
     function ImportError(name, globals, locals, fromlist, level) {
-      this.constructor.super_.apply(this, 'Failed to import ' + name);
+      Error.apply(this, 'Failed to import ' + name);
     }
 
     ImportError.prototype.name = 'ImportError';

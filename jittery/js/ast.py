@@ -254,7 +254,10 @@ class FunctionExpression(Function, Expression): pass
 
 @Node.properties(
   expressions={})
-class SequenceExpression(Expression): pass
+class SequenceExpression(Expression):
+  def __init__(self, *expressions, **kwargs):
+    kwargs['expressions'] = expressions
+    super().__init__(**kwargs)
 
 @Node.properties(
   operator={},

@@ -64,22 +64,26 @@ class JSTransformer(ast.NodeTransformer):
     super().__init__()
 
   def visit_Module(self, node):
-    main_body = []
+    module_pre = []
+    module_body = []
+    module_post = []
+    if self.module_name.endswith('.__init__') or self.module_name == '__init__':
+      module_pre.append(
+        goog_provide(self.package.name))
+      module_pre.append(
+        js_ast.ExpressionStatement(
+          js_ast.AssignmentExpression(
+            left=js_ast.MemberExpression(
+              object=js_ast.ThisExpression(),
+              property=js_ast.Literal(self.package.name),
+              computed=True),
+            right=js_ast.Identifier(self.package.name))))
+    else:
+      module_pre.append(
+        goog_require(self.package.name))
     if self.module_name == '__main__':
       imprt = 'jittery.module.__import__'
-      entry = js_ast.FunctionExpression(
-        params=[],
-        body=[
-          goog_require(imprt),
-          js_ast.ExpressionStatement(
-            js_ast.CallExpression(
-              callee=object_path(imprt),
-              arguments=[js_ast.Literal('__main__')]
-            )
-          ),
-        ])
-      entry_name = '%s.__entry_point__' % self.package
-      main_body += [
+      module_post += [
         goog_require(imprt),
         js_ast.ExpressionStatement(
           js_ast.CallExpression(
@@ -93,15 +97,15 @@ class JSTransformer(ast.NodeTransformer):
       file_ctx['__module__'] = None
       module_id = file_ctx['__module__']
       provide_module = self.module_name
-      if self.module_name == '__main__' and self.package:
-        provide_module = '%s.%s' % (self.package, self.module_name)
+      if self.module_name == '__main__' and self.package.name:
+        provide_module = '%s.%s' % (self.package.name, self.module_name)
       module_ctx.base_obj = object_path(provide_module)
       name = self.context.assign('__name__', js_ast.Literal(self.module_name))
       self.generic_visit(node)
       if self.bare:
         return js_ast.Program(body=node.body)
       else:
-        body = [
+        module_body += [
           goog_provide(provide_module),
           js_ast.ExpressionStatement(
             js_ast.AssignmentExpression(
@@ -111,18 +115,18 @@ class JSTransformer(ast.NodeTransformer):
         ] + node.body
         module_func = js_ast.FunctionExpression(
           params=[module_id],
-          body=body)
+          body=module_body)
         call = js_ast.CallExpression(
           callee=object_path('jittery.module.__register_module__'),
           arguments=[
             js_ast.Literal(self.module_name),
             module_func,
           ])
-        return js_ast.Program(body=[
-          goog_provide(self.package),
-          goog_require('jittery.module.__register_module__'),
-          js_ast.ExpressionStatement(call),
-        ] + main_body)
+        return js_ast.Program(
+          body=module_pre + [
+            goog_require('jittery.module.__register_module__'),
+            js_ast.ExpressionStatement(call),
+          ] + module_post)
 
   def visit_Expr(self, node):
     self.generic_visit(node)
@@ -419,9 +423,6 @@ class JSTransformer(ast.NodeTransformer):
   def visit_And(self, node):
     return js_ast.LogicalOperator('&&')
 
-  def visit_ImportFrom(self, node):
-    raise NotImplementedError(node)
-
   def visit_AugLoad(self, node):
     raise NotImplementedError(node)
 
@@ -431,8 +432,39 @@ class JSTransformer(ast.NodeTransformer):
   def visit_Assert(self, node):
     raise NotImplementedError(node)
 
+  def visit_ImportFrom(self, node):
+    imprt = self.visit_Import(
+      ast.Import(names=[ast.alias(node.module, None)]))
+    for name in node.names:
+      opath = object_path('.'.join((node.module, name.name)))
+      asname = name.asname if name.asname else name.name
+      imprt.body.append(self.context.assign(asname, opath))
+    return imprt
+
   def visit_Import(self, node):
-    raise NotImplementedError(node)
+    self.generic_visit(node)
+    imprt = 'jittery.module.__import__'
+    exprs = [
+      goog_require(imprt),
+    ]
+    imprt_obj = object_path(imprt)
+    for alias in node.names:
+      name = alias.name
+      imprt_call = js_ast.CallExpression(
+        callee=imprt_obj,
+        arguments=[js_ast.Literal(name)])
+      if alias.asname:
+        exprs.append(
+          self.context.assign(alias.asname, imprt_call))
+      else:
+        exprs.append(
+          js_ast.ExpressionStatement(
+            js_ast.AssignmentExpression(
+              left=object_path(name),
+              right=imprt_call)))
+      exprs.append(
+        goog_require(name))
+    return js_ast.BlockStatement(exprs)
 
   def visit_Dict(self, node):
     raise NotImplementedError(node)
