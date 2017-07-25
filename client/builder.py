@@ -5,6 +5,18 @@ def name(name, ctx=None):
     return ast.Name(name, ctx or ast.Load())
 
 
+def parse_expr(expr):
+    module = ast.parse(expr)
+    try:
+        node = ast.parse(expr)
+    except SyntaxError:
+        assert False
+    assert isinstance(node, ast.Module)
+    assert len(node.body) == 1
+    assert isinstance(node.body[0], ast.Expr)
+
+    return node.body[0].value
+
 def assign(target, value):
     try:
         it = iter(target)
@@ -20,13 +32,26 @@ def assign(target, value):
     return ast.Assign(it, value)
 
 
+def arguments(args=None, vararg=None, kwonlyargs=None, kw_defaults=None, kwarg=None, defaults=None):
+    if args is None:
+        args = []
+    if kwonlyargs is None:
+        kwonlyargs = []
+    if defaults is None:
+        defaults = []
+    if kw_defaults is None:
+        kw_defaults = []
+    return ast.arguments(args, vararg, kwonlyargs, kw_defaults, kwarg, defaults)
+
+
 def new_scope(body, ret):
     body = list(body)
     body.append(ast.Return(ret))
     fn = ast.FunctionDef(
         None,
-        ast.arguments([], None, [], None, [], []),
+        arguments(),
         body, [], None)
+    fn.__new_scope = True
     return ast.Call(fn, [], [])
 
 
@@ -45,6 +70,19 @@ def to_ast(val):
         return ast.Num(val)
     elif isinstance(val, str):
         return ast.Str(val)
+    elif isinstance(val, dict):
+        keys = []
+        vals = []
+        for k, v in val.items():
+            keys.append(to_ast(k))
+            vals.append(to_ast(v))
+        return ast.Dict(keys, vals)
+    elif isinstance(val, list):
+        return ast.List([to_ast(v) for v in val], ast.Load())
+    elif isinstance(val, tuple):
+        return ast.Tuple([to_ast(v) for v in val], ast.Load())
+    elif isinstance(val, set):
+        return ast.Set([to_ast(v) for v in val])
     else:
         return NotImplementedError(val)
 
@@ -64,25 +102,25 @@ class ASTBuilder:
         return ASTBuilder(ast.Compare(
             self.node,
             [ast.Gt()],
-            to_ast(other)))
+            [to_ast(other)]))
 
     def __lt__(self, other):
         return ASTBuilder(ast.Compare(
             self.node,
             [ast.Lt()],
-            to_ast(other)))
+            [to_ast(other)]))
 
     def __ge__(self, other):
         return ASTBuilder(ast.Compare(
             self.node,
             [ast.GtE()],
-            to_ast(other)))
+            [to_ast(other)]))
 
     def __le__(self, other):
         return ASTBuilder(ast.Compare(
             self.node,
             [ast.LtE()],
-            to_ast(other)))
+            [to_ast(other)]))
 
     def __add__(self, other):
         return ASTBuilder(ast.BinOp(
@@ -132,6 +170,11 @@ class ASTBuilder:
     def __getitem__(self, key):
         return ASTBuilder(ast.Subscript(self.node, ast.Index(to_ast(key)), ast.Load()))
 
-
     def attr(self, attr):
         return ASTBuilder(ast.Attribute(self.node, attr, ast.Load()))
+
+    def or_(self, *others):
+        return ASTBuilder(ast.BoolOp(ast.Or(), [to_ast(o) for o in (self,) + others]))
+
+    def and_(self, *others):
+        return ASTBuilder(ast.BoolOp(ast.And(), [to_ast(o) for o in (self,) + others]))

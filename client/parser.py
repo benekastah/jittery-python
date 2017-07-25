@@ -3,8 +3,9 @@ import ast
 import enum
 import io
 import random
+import sys
 
-from .builder import name, assign, new_scope
+from .builder import name, assign, new_scope, arguments, parse_expr
 from .builder import ASTBuilder as _
 
 
@@ -18,36 +19,69 @@ def extend(ls, nodes):
 
 class Context:
 
-    def __init__(self, parent=None, class_name=None):
-        self.parent = parent
+    _global_context = None
+
+    def __init__(self, parent=None, base_obj=None):
         self.vars = set()
-        self.class_name = class_name
+        self.novars = set()
+        self.parent = parent
+        self.base_obj = base_obj
+        self.is_module = False
+
+    def __contains__(self, var):
+        return self.has_var(var) or var in (self.parent or set())
 
     def has_var(self, var):
-        return var in self.vars
+        return var in self.vars or var in self.novars
 
     def add_var(self, var):
         self.vars.add(var)
+        return var
 
-    def gensym(self, name=''):
-        sym = '__{}{}'.format(name, random.randrange(1e5))
-        self.add_var(sym)
+    def add_novar(self, arg):
+        self.novars.add(arg)
+        return arg
+
+    def gensym(self, name='', no_var=False):
+        sym = '${}'.format(name)
+        i = 1
+        while sym in self:
+            sym = '${}{}'.format(name, i)
+            i += 1
+        if no_var:
+            self.add_novar(sym)
+        else:
+            self.add_var(sym)
         return sym
 
-    def __iter__(self):
-        yield from self.vars
+    @staticmethod
+    def is_gensym(name):
+        return name.startswith('$')
 
-    def __len__(self):
-        return len(self.vars)
+    def merge(self, context):
+        self.vars |= context.vars
+        self.novars |= context.novars
 
-    def __bool__(self):
-        return bool(self.vars)
+    def __repr__(self):
+        me = repr(self.vars | self.novars)
+        if self.base_obj:
+            me = '{} = {}'.format(ast.dump(self.base_obj), me)
+        if self.parent:
+            me = '{} -> {}'.format(repr(self.parent), me)
+        return me
+
+    @classmethod
+    def get_global_context(cls):
+        if not Context._global_context:
+            Context._global_context = Context()
+        return Context._global_context
 
 
 class JavaScript:
 
-    def __init__(self, fname, file):
+    def __init__(self, fname, module_name, file):
         self.fname = fname
+        self.module_name = module_name
         self.file = file
         self._indent_level = 0
 
@@ -88,13 +122,17 @@ class JavaScript:
 
 class Simplify(ast.NodeTransformer):
 
-    def __init__(self):
+    def __init__(self, fname, module_name):
         super().__init__()
-        self.context = None
+        self.fname = fname
+        self.module_name = module_name
+        self.module_context = None
+        self.context = Context.get_global_context()
+        self.star_imports = []
 
     @contextmanager
-    def _block(self, class_name=None):
-        self.context = Context(self.context, class_name)
+    def _block(self, base_obj=None):
+        self.context = Context(self.context, base_obj)
         yield
         self.context = self.context.parent
 
@@ -110,80 +148,191 @@ class Simplify(ast.NodeTransformer):
             node = ast.copy_location(_(decorator)(node).node, node)
         return node
 
+    def _assign_from_context(self):
+        should_expand = self.context.is_module or not self.context.base_obj
+        vars_ = [name(v) for v in self.context.vars if should_expand or Context.is_gensym(v)]
+        if vars_:
+            return assign(vars_, None)
+
+    def _assign(self, a, b):
+        result = self.visit(assign(a, _(None).node))
+        return assign(result.targets, b)
+
     def visit_Module(self, node):
-        with self._block():
-            node = self.generic_visit(node)
-            if self.context:
-                var_assignment = ast.copy_location(
-                    assign([name(var) for var in self.context], None), node)
-                return ast.copy_location(
-                    ast.Module([
-                        var_assignment,
-                        *node.body
-                    ]), node)
+        def is_bare(node):
+            if isinstance(node.body[0], ast.Expr):
+                val = node.body[0].value
+                if isinstance(val, ast.Str) and val.s.strip() == 'bare module':
+                    return True
+            return False
+
+        module_var = self.context.gensym('module')
+        self.star_imports.append(module_var)
+        with self._block(name(module_var)):
+            self.context.is_module = True
+            self.context.add_novar(module_var)
+            body = []
+            if not is_bare(node):
+                body.append(ast.ImportFrom('builtins', [ast.alias(name='*', asname=None)], 0))
+            module_name_str = ast.Str(self.module_name)
+            body.extend([
+                assign(name('__module__'), name(module_var)),
+                assign(name('__name__'), module_name_str),
+                assign(name('__file__'), ast.Str(self.fname))
+            ])
+            body.extend(node.body)
+            body.append(ast.Return(name(module_var)))
+            module = ast.copy_location(
+                _(name('JITTERY')).register_module(
+                    ast.Str(self.fname),
+                    module_name_str,
+                    ast.FunctionDef(None, arguments(args=[ast.arg(module_var, None)]), body,
+                                    [], None)).node,
+                node)
+            return self.visit(module)
+
+    def _assign_import(self, alias, result):
+        assert alias.name != '*', 'Star imports not supported'
+        parts = (alias.asname or alias.name).split('.')
+        assignee = None
+        for i, part in enumerate(parts):
+            if not assignee:
+                self.context.add_var(part)
+                assignee = name(part)
             else:
-                return node
+                assignee = _(assignee).attr(part).node
+            if i < len(parts) - 1:
+                assignment = _(assignee).or_({}).node
+            else:
+                assignment = result
+            yield self.visit(assign(assignee, assignment))
+
+    def visit_ImportFrom(self, node):
+        nodes = []
+        result = _(name('JITTERY')).__import__(node.module, None, None, [
+            alias.name for alias in node.names
+        ], node.level).node
+        imprt = name(self.context.gensym('import'))
+        nodes.append(self.visit(ast.copy_location(
+            assign(imprt, result), node)))
+        for alias in node.names:
+            if alias.name == '*':
+                self.star_imports.append(node.module)
+                alias = ast.alias(node.module, None)
+            extend(nodes, self._assign_import(alias, imprt))
+        return nodes
+
+    def visit_Import(self, node):
+        nodes = []
+        for alias in node.names:
+            result = _(name('JITTERY')).__import__(name(alias.name), None, None, [], 0).node
+            imprt = name(self.context.gensym('import'))
+            nodes.append(self.visit(ast.copy_location(
+                assign(imprt, result), node)))
+            extend(nodes, self._assign_import(alias, imprt))
+        return nodes
 
     def visit_FunctionDef(self, node):
         assert not node.args.kwonlyargs
         assert not node.args.kw_defaults
 
-        with self._block():
-            node = self.generic_visit(node)
+        if getattr(node, '__new_scope', False):
+            return self.generic_visit(node)
+
+        is_module = self.context.is_module
+        is_new_scope = getattr(node, '__new_scope', False)
+
+        @contextmanager
+        def _block():
+            if self.context.is_module:
+                context = self.context
+                with self._block(self.context.base_obj):
+                    self.context.merge(context)
+                    context = self.context
+                    yield
+                self.context.merge(context)
+            else:
+                with self._block():
+                    yield
+
+        def _assign_from_context(body):
+            var_assignment = self._assign_from_context()
+            if var_assignment:
+                body.insert(0, ast.copy_location(var_assignment, node))
+
+        is_expr = not node.name
+        fn_name = name(self.context.gensym('fn', no_var=True))
+        self.context.add_novar(fn_name.id)
+        with _block():
             body = []
+            if not is_new_scope:
+                args_ = name(self.context.gensym('args', no_var=True))
+                kwarg = None
+                if node.args.kwarg:
+                    kwarg = name(self.context.add_novar(node.args.kwarg.arg))
 
-            if node.args.defaults:
-                for (n, arg), default in zip(
-                        reversed(list(enumerate(node.args.args))), reversed(node.args.defaults)):
-                    body.append(self.visit(ast.copy_location(
-                        ast.If(
-                            ast.Compare(_(name('arguments')).length.node, [ast.LtE()], [ast.Num(n)]),
-                            [assign(name(arg.arg), default)],
-                            []),
-                        arg)))
 
-            if node.args.vararg:
-                body.append(self.visit(ast.copy_location(
-                    assign(
-                        name(node.args.vararg.arg),
-                        _(name('Array')).prototype.slice.call(name('arguments'), len(node.args.args)).node),
-                    node.args.vararg)))
+                defaults = [None] * (len(node.args.args) - len(node.args.defaults))
+                defaults += node.args.defaults
+                assert len(defaults) == len(node.args.args)
 
-            if node.args.kwarg:
-                __js__ = _(name('__js__'))
-                arguments = name(node.args.vararg.arg if node.args.vararg else 'arguments')
-                peek_kwarg = _(name('arguments'))[_(name('arguments')).length - 1].node
-                get_kwarg = None
+                for i, (arg, default) in enumerate(zip(node.args.args, defaults)):
+                    val = _(args_)[i].node
+                    if default:
+                        val = ast.IfExp((_(name('len'))(args_) > i).node, val, default)
+                    extend(body, self.visit(ast.copy_location(assign(name(arg.arg), val), node)))
+
                 if node.args.vararg:
-                    get_kwarg = _(name(node.args.vararg.arg)).pop().node
-                else:
-                    get_kwarg = peek_kwarg
-                get_kwarg = ast.Expr(get_kwarg)
-                body.append(self.visit(ast.copy_location(
-                    ast.If(_(name('__is_kwarg__'))(peek_kwarg).node, [get_kwarg], []),
-                    node.args.kwarg)))
+                    body.append(self.visit(ast.copy_location(
+                        assign(
+                            name(node.args.vararg.arg),
+                            _(name('Array')).prototype.slice.call(
+                                args_, len(node.args.args)
+                            ).node),
+                        node.args.vararg)))
+
+                if node.args.kwarg:
+                    get_kwarg = assign(kwarg, _(kwarg).or_({}).node)
+                    body.append(self.visit(ast.copy_location(get_kwarg, node.args.kwarg)))
+
+            node = self.generic_visit(node)
 
             # Do this after processing other args
-            context_args = self.context.vars - set(a.arg for a in node.args.args)
-            if context_args:
-                body.insert(0, ast.copy_location(
-                    assign([name(var) for var in context_args], None),
-                    node))
+            if not is_module:
+                _assign_from_context(body)
+
             body.extend(node.body)
 
+        # Assign from context again for module stuff
+        if is_module:
+            _assign_from_context(body)
+
+        new_args = arguments(args=(
+            [ast.arg(args_.id, None)] + ([ast.arg(kwarg.id, None)] if kwarg else [])))
+
         fn = ast.copy_location(
-            ast.FunctionDef(node.name, node.args, body, [], node.returns),
+            ast.FunctionDef(fn_name.id, new_args, body, [], node.returns),
             node)
 
-        if node.name and (node.decorator_list or self.context.class_name):
-            nodes = [fn]
-            fn = self._decorate(name(node.name), node.decorator_list)
-            extend(nodes, ast.copy_location(
-                self.visit(assign(name(node.name), fn)),
-                node))
-            return nodes
+        if is_new_scope:
+            return fn
         else:
-            return self._decorate(fn, node.decorator_list)
+            assign_call = ast.copy_location(
+                self.visit(assign(_(fn_name).attr('__call__').node, fn_name)),
+                node)
+
+            nodes = [fn]
+            fn = self._decorate(fn_name, node.decorator_list)
+            if node.name:
+                extend(nodes, ast.copy_location(
+                    self._assign(name(node.name), fn),
+                    node))
+            extend(nodes, assign_call)
+
+            if is_expr:
+                return ast.copy_location(new_scope(nodes, fn_name), node)
+            else:
+                return nodes
 
     def visit_ClassDef(self, node):
         assert len(node.bases) <= 1
@@ -191,40 +340,53 @@ class Simplify(ast.NodeTransformer):
 
         nodes = []
 
-        # Keep a reference to the original class so that reassigning to
-        # node.name doesn't affect our ability to instantiate
-        saved_cls = name(Context().gensym(node.name))
-        nodes.append(ast.copy_location(
-            assign(saved_cls, None),
-            node))
-        nodes.append(ast.copy_location(
-            assign(saved_cls, name(node.name)),
-            node))
+        with self._block():
+            # Keep a reference to the original class so that reassigning to
+            # node.name doesn't affect our ability to instantiate
+            saved_cls = name(self.context.gensym(node.name))
+            nodes.append(
+                self.visit(ast.copy_location(
+                    assign(saved_cls, None),
+                    node)))
 
-        __js__ = _(name('__js__'))
-        newcall = __js__('new (Function.prototype.bind.apply(' + saved_cls.id + ', arguments))')
-        extend(nodes, self.visit(ast.copy_location(
-            ast.FunctionDef(
-                node.name,
-                ast.arguments([], None, [], None, [], []), [
-                    ast.If(__js__('!(this instanceof ' + saved_cls.id + ')').node, [ast.Return(newcall.node)], []),
-                    ast.Expr(__js__('this.__init__ && this.__init__.apply(this, arguments)').node)
-                ],
-                node.decorator_list,
-                None), node)))
+            __js__ = _(name('__js__'))
+            this = self.context.gensym('self')
+            makeself = assign(name(this), __js__('Object.create({}.prototype)'.format(saved_cls.id)).node)
 
-        if node.bases:
-            nodes.append(ast.copy_location(
-                assign(
-                    _(saved_cls).prototype.node,
-                    _(name('Object')).create(_(node.bases[0]).prototype).node),
-                node))
+            keyname = name(self.context.gensym('key'))
+            fnname = name(self.context.gensym('fn'))
+            bindall = __js__('JITTERY.bindall({})'.format(this)).node
 
-        with self._block(saved_cls.id):
-            for entry in node.body:
-                extend(nodes, self.visit(entry))
+            extend(nodes, self.visit(ast.copy_location(
+                ast.FunctionDef(
+                    saved_cls.id,
+                    arguments(), [
+                        makeself,
+                        assign(_(name(this)).attr('__class__').node, saved_cls),
+                        ast.Expr(bindall),
+                        ast.Expr(__js__('{0}.__init__ && {0}.__init__.apply(null, arguments)'.format(this)).node),
+                        ast.Return(name(this))
+                    ],
+                    node.decorator_list,
+                    None), node)))
 
-        return ast.copy_location(ast.Expr(new_scope(nodes, name(node.name))), node)
+            extend(nodes, self.visit(ast.copy_location(
+                assign(_(saved_cls).attr('__name__').node, ast.Str(node.name)),
+                node)))
+
+            if node.bases:
+                nodes.append(self.visit(ast.copy_location(
+                    assign(
+                        _(saved_cls).prototype.node,
+                        _(name('Object')).create(_(node.bases[0]).prototype).node),
+                    node)))
+
+            with self._block(_(saved_cls).prototype.node):
+                for entry in node.body:
+                    extend(nodes, self.visit(entry))
+
+        return ast.copy_location(
+            self._assign(name(node.name), new_scope(nodes, saved_cls)), node)
 
     def visit_Lambda(self, node):
         ret = ast.copy_location(
@@ -252,12 +414,12 @@ class Simplify(ast.NodeTransformer):
         nodes = []
         it = self._gensym('iter')
         running = self._gensym('running')
-        extend(nodes, ast.copy_location(
+        extend(nodes, self.visit(ast.copy_location(
             assign(it, _(name('iter'))(node.iter).node),
-            node))
-        extend(nodes, ast.copy_location(
+            node)))
+        extend(nodes, self.visit(ast.copy_location(
             assign(running, _(True).node),
-            node))
+            node)))
         body = ast.copy_location(ast.Try([
             ast.copy_location(
                 assign(node.target, _(name('next'))(it).node),
@@ -266,11 +428,10 @@ class Simplify(ast.NodeTransformer):
         ], [ast.ExceptHandler(name('StopIteration'), None, [
             assign(running, _(False).node)
         ])], [], []), node)
-        while_nodes = self.visit(ast.copy_location(
+        extend(nodes, self.visit(ast.copy_location(
             ast.While(running, [body], node.orelse),
-            node))
-        extend(nodes, while_nodes)
-        return [self.generic_visit(n) for n in nodes]
+            node)))
+        return nodes
 
     def visit_While(self, node):
         nodes = []
@@ -299,13 +460,37 @@ class Simplify(ast.NodeTransformer):
     def visit_Name(self, node):
         if isinstance(node.ctx, ast.Store):
             self.context.add_var(node.id)
-            if self.context.class_name:
-                return ast.copy_location(
-                    _(name(self.context.class_name)).prototype.attr(node.id).node,
-                    node)
-        return node
+
+        if Context.is_gensym(node.id) or node.id in ('this', '__js__', 'JITTERY'):
+            # These vars are autogenerated, don't need special treatment
+            return node
+
+        context = self.context
+        while context:
+            if context.has_var(node.id):
+                if context.base_obj:
+                    return ast.copy_location(
+                        _(context.base_obj).attr(node.id).node,
+                        node)
+                else:
+                    return node
+            context = context.parent
+
+        def _parse_expr(module):
+            if Context.is_gensym(module):
+                return name(module)
+            else:
+                return parse_expr(module)
+
+        # Not found
+        obj = _(node)
+        for module in self.star_imports:
+            module_expr = _(_parse_expr(module)).attr(node.id).node
+            obj = _(self.visit(module_expr)).or_(obj)
+        return ast.copy_location(obj.node, node)
 
     def visit_Compare(self, node):
+        node = self.generic_visit(node)
         if len(node.ops) == 1:
             return node
 
@@ -325,23 +510,23 @@ class Simplify(ast.NodeTransformer):
                 ast.Compare(left, [op], [comp]),
                 node))
 
-        return self.generic_visit(ast.copy_location(
+        return ast.copy_location(
             ast.BoolOp(ast.And(), comparisons),
-            node))
+            node)
 
     def visit_Call(self, node):
         node = self.generic_visit(node)
+        fn_name = node.func.id if isinstance(node.func, ast.Name) else None
+        if fn_name == '__js__':
+            return node
+
         if node.keywords:
             kwargs = self.visit(ast.copy_location(
-                _(name('__make_kwarg__'))(
-                    ast.Dict([ast.Str(k.arg) for k in node.keywords],
-                             [k.value for k in node.keywords])).node,
+                ast.Dict([ast.Str(k.arg) for k in node.keywords],
+                         [k.value for k in node.keywords]),
                 node))
-            args = list(node.args)
-            args.append(kwargs)
-            node = ast.copy_location(
-                ast.Call(node.func, args, []),
-                node)
+        else:
+            kwargs = _(None).node
 
         grouped_args = []
         last_group = []
@@ -358,22 +543,24 @@ class Simplify(ast.NodeTransformer):
         if last_group:
             grouped_args.append(last_group)
 
-        if has_starred:
-            args = None
-            for group in grouped_args:
-                if isinstance(group, ast.Starred):
-                    arg = group.value
-                else:
-                    arg = ast.List(group, ast.Load())
-                if not args:
-                    args = arg
-                else:
-                    args = _(args).concat(arg).node
-            node = ast.copy_location(
-                ast.Call(_(node.func).apply.node, [_(None).node, args], node.keywords),
-                node)
+        args = None
+        for group in grouped_args:
+            if isinstance(group, ast.Starred):
+                arg = group.value
+            else:
+                arg = ast.List(group, ast.Load())
+            if not args:
+                args = arg
+            else:
+                args = _(args).concat(arg).node
 
-        return node
+        if not args:
+            args = ast.List([], ast.Load())
+
+        this = node.func.value if isinstance(node.func, ast.Attribute) else _(None).node
+        return ast.copy_location(
+            _(name('__js__'))('JITTERY.__call__').call(this, node.func, args, kwargs).node,
+            node)
 
     def visit_Dict(self, node):
         node = self.generic_visit(node)
@@ -403,10 +590,34 @@ class Simplify(ast.NodeTransformer):
             for k, v in expr_kvs:
                 body.append(ast.copy_location(
                     assign(_(d)[k].node, v), k))
-            body.append(ast.copy_location(ast.Return(d), node))
             node = self.visit(ast.copy_location(new_scope(body, d), node))
 
         return node
+
+    def visit_Try(self, node):
+        node = self.generic_visit(node)
+        main_name = name(node.handlers[0].name or self.context.gensym('exc'))
+        next_orelse = [
+            ast.Raise(main_name, None)
+        ]
+        for handler in reversed(node.handlers):
+            body = []
+            if handler.name and main_name.id != handler.name:
+                body.append(ast.copy_location(
+                    assign(name(handler.name), main_name),
+                    handler))
+            body += handler.body
+            if handler.type:
+                test = _(name('isinstance'))(main_name, handler.type)
+                next_orelse = [ast.copy_location(
+                    ast.If(test.node, body, next_orelse),
+                    handler)]
+            else:
+                next_orelse = body
+        next_orelse = [self.visit(n) for n in next_orelse]
+        return ast.copy_location(
+            ast.Try(node.body, [ast.ExceptHandler(None, main_name, next_orelse)], node.orelse, node.finalbody),
+            node)
 
 
 class ToJS(ast.NodeVisitor):
@@ -440,15 +651,6 @@ class ToJS(ast.NodeVisitor):
             with self.js.line(';'):
                 yield
 
-    def visit_Module(self, node):
-        self.js.indent()
-        self.js.write('(function ()')
-        with self.js.block():
-            with self.write_stmt():
-                self.js.write('"use strict"')
-            self.visit_children(node)
-        self.js.write(')();')
-
     def visit_Expr(self, node):
         with self.write_stmt():
             self.visit_children(node)
@@ -481,8 +683,9 @@ class ToJS(ast.NodeVisitor):
     def visit_Str(self, node):
         self.js.write('"')
         for ch in node.s:
-            if ch == '"':
-                self.js.write(r'\"')
+            if ch in ('"', '\n', '\r'):
+                self.js.write('\\')
+                self.js.write(ch)
             else:
                 self.js.write(ch)
         self.js.write('"')
@@ -501,6 +704,7 @@ class ToJS(ast.NodeVisitor):
             self.js.write(')')
 
             with self.js.block():
+                self.visit(ast.Expr(ast.Str('use strict')))
                 for entry in node.body:
                     self.visit(entry)
 
@@ -530,36 +734,36 @@ class ToJS(ast.NodeVisitor):
                     self.visit(entry)
         self.js.write('\n')
 
+    def visit_IfExp(self, node):
+        self.js.write('((')
+        self.visit(node.test)
+        self.js.write(') ? (')
+        self.visit(node.body)
+        self.js.write(') : (')
+        self.visit(node.orelse)
+        self.js.write('))')
+
     def visit_Try(self, node):
+        assert len(node.handlers) == 1
+        assert node.handlers[0].type == None
+        assert isinstance(node.handlers[0].name, ast.Name)
+
+        # TODO implement these
+        assert not node.orelse
+        assert not node.finalbody
+
+        handler, = node.handlers
+
         with self.write_stmt():
-            self.js.write('try ')
+            self.js.write('try')
             with self.js.block():
                 for entry in node.body:
                     self.visit(entry)
             self.js.write(' catch (')
-            main_name = name(node.handlers[0].name or Context().gensym('exc'))
-            self.visit(main_name)
-            self.js.write(') ')
-
-            next_orelse = [
-                ast.Raise(main_name, None)
-            ]
-            for handler in reversed(node.handlers):
-                body = []
-                if handler.name and main_name.id != handler.name:
-                    body.append(ast.copy_location(
-                        assign(name(handler.name), main_name),
-                        handler))
-                body += handler.body
-                if handler.type:
-                    test = _(name('isinstance'))(main_name, handler.type)
-                    next_orelse = [ast.copy_location(
-                        ast.If(test.node, body, next_orelse),
-                        handler)]
-                else:
-                    next_orelse = body
+            self.visit(handler.name)
+            self.js.write(')')
             with self.js.block():
-                for entry in next_orelse:
+                for entry in handler.body:
                     self.visit(entry)
 
     def visit_Raise(self, node):
@@ -646,6 +850,7 @@ class ToJS(ast.NodeVisitor):
         self.visit(node.operand)
 
     def visit_Compare(self, node):
+        self.js.write('(')
         assert len(node.ops) == 1
         assert len(node.comparators) == 1
         self.visit(node.left)
@@ -653,14 +858,18 @@ class ToJS(ast.NodeVisitor):
         self.visit(node.ops[0])
         self.js.write(' ')
         self.visit(node.comparators[0])
+        self.js.write(')')
 
     def visit_BoolOp(self, node):
+        assert len(node.values) > 1
+        self.js.write('(')
         for i, val in enumerate(node.values):
             if i != 0:
                 self.js.write(' ')
                 self.visit(node.op)
                 self.js.write(' ')
             self.visit(val)
+        self.js.write(')')
 
     def visit_Add(self, node):
         self.js.write('+')
@@ -748,12 +957,11 @@ class ToJS(ast.NodeVisitor):
         pass
 
 
-def to_js(source, *args, **kwargs):
-    nodes = ast.parse(source, *args, **kwargs)
-    nodes = Simplify().visit(nodes)
-    with io.StringIO() as f:
-        js = JavaScript('<none>', f)
+def to_js(fname, module_name, outfile):
+    with open(fname) as f:
+        nodes = ast.parse(f.read(), filename=fname)
+        nodes = Simplify(fname, module_name).visit(nodes)
+        js = JavaScript(fname, module_name, outfile)
         visitor = ToJS(js)
         visitor.visit(nodes)
-        js.seek(0)
-        return js.read()
+        js.write('\n')

@@ -1,3 +1,9 @@
+"""
+bare module
+"""
+
+__import__ = __js__('JITTERY.__import__')
+
 
 class Exception(Error):
 
@@ -32,15 +38,6 @@ class IndexableIterator(Iterator):
             raise StopIteration()
 
 
-def __make_kwarg__(d):
-    d['__kwarg__'] = True
-    return d
-
-
-def __is_kwarg__(d):
-    return d and hasattr(d, '__kwarg__') and d.__kwarg__
-
-
 class range(Iterator):
 
     def __init__(self, start, stop=None, step=1):
@@ -62,7 +59,7 @@ class range(Iterator):
 def iter(it):
     if it and it.__iter__:
         return it.__iter__()
-    elif hasattr(it, 'length'):
+    elif Array.isArray(it):
         return IndexableIterator(it)
     else:
         return IndexableIterator(Object.keys(it))
@@ -83,12 +80,12 @@ def len(l):
         return l.__len__()
 
 
-def print(*args):
-    console.log.apply(console, args)
+def print(*objects):
+    console.log.apply(console, objects)
 
 
 def isinstance(a, b):
-    if hasattr(l, 'length'):
+    if Array.isArray(b):
         for t_ in b:
             if __js__('a instanceof t_'):
                 return True
