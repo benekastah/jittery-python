@@ -5,8 +5,9 @@ import io
 import random
 import sys
 
-from .builder import name, assign, new_scope, arguments, parse_expr
-from .builder import ASTBuilder as _
+from savior.builder import ASTBuilder as _
+from savior.builder import name, assign, new_scope, arguments
+from savior.util import parse_expr
 
 
 def extend(ls, nodes):
@@ -160,7 +161,7 @@ class Simplify(ast.NodeTransformer):
 
     def visit_Module(self, node):
         def is_bare(node):
-            if isinstance(node.body[0], ast.Expr):
+            if node.body and isinstance(node.body[0], ast.Expr):
                 val = node.body[0].value
                 if isinstance(val, ast.Str) and val.s.strip() == 'bare module':
                     return True
@@ -436,21 +437,19 @@ class Simplify(ast.NodeTransformer):
     def visit_While(self, node):
         nodes = []
 
-        br = None
         body = []
-        for entry in node.body:
-            if node.orelse and isinstance(entry, ast.Break):
-                br = self._gensym('break')
-                body.append(ast.copy_location(
-                    assign(br, _(True).node),
-                    entry))
-            body.append(entry)
+        if node.orelse:
+            br = self._gensym('break')
+            body.append(assign(br, _(True).node))
+        extend(body, node.body)
+        if node.orelse:
+            body.append(assign(br, _(False).node))
 
         nodes.append(ast.copy_location(
             ast.While(node.test, body, []),
             node))
 
-        if br:
+        if node.orelse:
             nodes.append(ast.copy_location(
                 ast.If(ast.UnaryOp(ast.Not(), br), node.orelse, []),
                 node.orelse[0]))
@@ -619,6 +618,48 @@ class Simplify(ast.NodeTransformer):
             ast.Try(node.body, [ast.ExceptHandler(None, main_name, next_orelse)], node.orelse, node.finalbody),
             node)
 
+    def visit_Assign(self, node):
+        node = self.generic_visit(node)
+
+        ordinary = []
+        to_unpack = []
+        for target in node.targets:
+            if isinstance(target, (ast.Tuple, ast.List)):
+                to_unpack.append(target)
+            else:
+                ordinary.append(target)
+
+        if not to_unpack:
+            return node
+
+        tmp = name(self.context.gensym('tmp'))
+        nodes = [assign(tmp, node.value)]
+        if ordinary:
+            nodes.append(assign(ordinary, node.value))
+
+        starred = None
+        for target in to_unpack:
+            for i, entry in enumerate(target.elts):
+                if isinstance(entry, ast.Starred):
+                    starred = [entry, i, None]
+                    continue
+                elif starred:
+                    starred[2] = i
+                    extend(nodes, self.visit(assign(entry, _(tmp)[_(tmp).length - i].node)))
+                else:
+                    extend(nodes, self.visit(assign(entry, _(tmp)[i].node)))
+
+        if starred:
+            entry, start, end = starred
+            val = None
+            if end:
+                val = _(tmp).slice(start, end)
+            else:
+                val = _(tmp).slice(start)
+            extend(nodes, self.visit(assign(entry, val)))
+
+        return nodes
+
 
 class ToJS(ast.NodeVisitor):
 
@@ -642,7 +683,7 @@ class ToJS(ast.NodeVisitor):
         raise NotImplementedError(node)
 
     @contextmanager
-    def write_stmt(self):
+    def _write_stmt(self):
         if self.in_expr[-1]:
             self.js.write('(')
             yield
@@ -652,11 +693,11 @@ class ToJS(ast.NodeVisitor):
                 yield
 
     def visit_Expr(self, node):
-        with self.write_stmt():
+        with self._write_stmt():
             self.visit_children(node)
 
     def visit_Assign(self, node):
-        with self.write_stmt():
+        with self._write_stmt():
             if node.value:
                 for target in node.targets:
                     self.visit(target)
@@ -670,7 +711,7 @@ class ToJS(ast.NodeVisitor):
                     self.visit(target)
 
     def visit_AugAssign(self, node):
-        with self.write_stmt():
+        with self._write_stmt():
             self.visit(node.target)
             self.js.write(' ')
             self.visit(node.op)
@@ -691,7 +732,7 @@ class ToJS(ast.NodeVisitor):
         self.js.write('"')
 
     def visit_FunctionDef(self, node):
-        with self.write_stmt():
+        with self._write_stmt():
             self.js.write('function ')
             if node.name:
                 self.visit(name(node.name))
@@ -754,7 +795,7 @@ class ToJS(ast.NodeVisitor):
 
         handler, = node.handlers
 
-        with self.write_stmt():
+        with self._write_stmt():
             self.js.write('try')
             with self.js.block():
                 for entry in node.body:
@@ -768,12 +809,12 @@ class ToJS(ast.NodeVisitor):
 
     def visit_Raise(self, node):
         assert not node.cause
-        with self.write_stmt():
+        with self._write_stmt():
             self.js.write('throw ')
             self.visit(node.exc)
 
     def visit_Return(self, node):
-        with self.write_stmt():
+        with self._write_stmt():
             self.js.write('return ')
             self.visit(node.value)
 
@@ -955,6 +996,10 @@ class ToJS(ast.NodeVisitor):
 
     def visit_Pass(self, node):
         pass
+
+    def visit_Break(self, node):
+        with self._write_stmt():
+            self.js.write('break')
 
 
 def to_js(fname, module_name, outfile):

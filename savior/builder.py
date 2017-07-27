@@ -5,18 +5,6 @@ def name(name, ctx=None):
     return ast.Name(name, ctx or ast.Load())
 
 
-def parse_expr(expr):
-    module = ast.parse(expr)
-    try:
-        node = ast.parse(expr)
-    except SyntaxError:
-        assert False
-    assert isinstance(node, ast.Module)
-    assert len(node.body) == 1
-    assert isinstance(node.body[0], ast.Expr)
-
-    return node.body[0].value
-
 def assign(target, value):
     try:
         it = iter(target)

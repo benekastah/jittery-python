@@ -30,9 +30,9 @@ class IndexableIterator(Iterator):
         self.i = 0
 
     def __next__(self):
-        if i < len(arr):
-            result = arr[i]
-            i += 1
+        if self.i < len(self.arr):
+            result = self.arr[self.i]
+            self.i += 1
             return result
         else:
             raise StopIteration()
